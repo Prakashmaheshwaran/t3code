@@ -78,6 +78,7 @@ import {
   ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
+  VoiceCallError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   type ServerConfig as ClientServerConfig,
@@ -279,6 +280,7 @@ import { requestUrl } from "./requestUrl.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
+const isVoiceCallError = Schema.is(VoiceCallError);
 
 const resolveDiscoveryForConfig = <A, E, R>(
   discovery: Effect.Effect<A, E, R>,
@@ -2039,6 +2041,37 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
+      /**
+       * Voice rides the Codex app-server's thread-scoped realtime transport, so the app thread
+       * must already own a live provider session.
+       */
+      const resolveVoiceProviderRuntime = Effect.fnUntraced(function* (threadId: ThreadId) {
+        const projection = yield* threadManagement.getThreadRecords(threadId, [
+          "providerThreads",
+        ]);
+        const providerThread =
+          projection.providerThreads.find(
+            (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+          ) ?? projection.providerThreads.at(-1);
+        const providerSessionId = providerThread?.providerSessionId ?? null;
+        if (providerThread === undefined || providerSessionId === null) {
+          return yield* new VoiceCallError({
+            threadId,
+            detail:
+              "No provider session has run in this thread yet. Send a message first so the Codex session opens.",
+          });
+        }
+        const runtime = Option.getOrNull(yield* providerSessionsV2.get(providerSessionId));
+        if (runtime === null) {
+          return yield* new VoiceCallError({
+            threadId,
+            detail:
+              "The provider session is no longer running. Send a message first so the Codex session reopens.",
+          });
+        }
+        return { providerThread, runtime };
+      });
+
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
@@ -2600,6 +2633,105 @@ export const layerWsRpc = (
                 ),
               ),
           ),
+        [WS_METHODS.voiceStart]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(
+            function* (input) {
+              const { providerThread, runtime } = yield* resolveVoiceProviderRuntime(
+                input.threadId,
+              );
+              if (runtime.startRealtime === undefined) {
+                return yield* new VoiceCallError({
+                  threadId: input.threadId,
+                  detail: `Provider '${runtime.driver}' does not support live voice calls.`,
+                });
+              }
+              yield* runtime.startRealtime({
+                providerThread,
+                sdp: input.sdp,
+                ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+                ...(input.voice === undefined ? {} : { voice: input.voice }),
+              });
+            },
+            (effect, input) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isVoiceCallError(cause)
+                    ? cause
+                    : new VoiceCallError({
+                        threadId: input.threadId,
+                        detail: "Failed to start the voice call.",
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+        [WS_METHODS.voiceStop]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          Effect.fnUntraced(
+            function* (input) {
+              const { providerThread, runtime } = yield* resolveVoiceProviderRuntime(
+                input.threadId,
+              );
+              if (runtime.stopRealtime === undefined) {
+                return yield* new VoiceCallError({
+                  threadId: input.threadId,
+                  detail: `Provider '${runtime.driver}' does not support live voice calls.`,
+                });
+              }
+              yield* runtime.stopRealtime({ providerThread });
+            },
+            (effect, input) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  isVoiceCallError(cause)
+                    ? cause
+                    : new VoiceCallError({
+                        threadId: input.threadId,
+                        detail: "Failed to stop the voice call.",
+                        cause,
+                      }),
+                ),
+              ),
+          ),
+        [WS_METHODS.voiceSubscribe]:
+          /* Request instrumentation already owns the span; keep this helper in that context. */
+          (input) =>
+            Stream.unwrap(
+              Effect.gen(function* () {
+                const { providerThread, runtime } = yield* resolveVoiceProviderRuntime(
+                  input.threadId,
+                );
+                const events = runtime.realtimeEvents;
+                if (events === undefined) {
+                  return yield* new VoiceCallError({
+                    threadId: input.threadId,
+                    detail: `Provider '${runtime.driver}' does not emit live voice events.`,
+                  });
+                }
+                // One provider session can host several provider threads; keep other calls' frames out.
+                const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+                if (nativeThreadId === undefined) return events;
+                return events.pipe(
+                  Stream.filter((event) => {
+                    const payload = event.payload;
+                    if (typeof payload !== "object" || payload === null) return true;
+                    const threadId = (payload as { readonly threadId?: unknown }).threadId;
+                    return threadId === undefined || threadId === nativeThreadId;
+                  }),
+                );
+              }).pipe(
+                Effect.mapError((cause) =>
+                  isVoiceCallError(cause)
+                    ? cause
+                    : new VoiceCallError({
+                        threadId: input.threadId,
+                        detail: "Failed to subscribe to voice call events.",
+                        cause,
+                      }),
+                ),
+              ),
+            ),
         [WS_METHODS.serverUpdateProvider]: (input) =>
           providerMaintenanceRunner.updateProvider(input),
         [WS_METHODS.providerConsumeResetCredit]:

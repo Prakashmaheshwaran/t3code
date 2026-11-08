@@ -604,6 +604,15 @@ export type ProviderAdapterV2SubagentOutcome = {
   readonly result: OrchestrationV2Subagent["result"];
 };
 
+/**
+ * A provider realtime-voice notification with its native method prefix stripped.
+ * `type` is the suffix after `thread/realtime/` (for example `sdp` or `transcript/delta`).
+ */
+export interface ProviderAdapterV2RealtimeEvent {
+  readonly type: string;
+  readonly payload: unknown;
+}
+
 export interface ProviderAdapterV2SessionRuntime {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
@@ -684,6 +693,20 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly reason?: string;
   }) => Effect.Effect<{ readonly feedbackId: string }, ProviderAdapterV2Error>;
+  /**
+   * Live voice-call transport. The provider answers over `realtimeEvents`; absent means the
+   * driver has no realtime voice support.
+   */
+  readonly startRealtime?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly sdp: string;
+    readonly prompt?: string;
+    readonly voice?: string;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
+  readonly stopRealtime?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
+  readonly realtimeEvents?: Stream.Stream<ProviderAdapterV2RealtimeEvent>;
   /** Absent means non-interactive apps with plain tool rows. */
   readonly mcpApps?: ProviderAdapterV2McpApps;
   readonly rollbackThread: (

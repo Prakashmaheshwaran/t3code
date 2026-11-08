@@ -1852,6 +1852,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ProviderAdapter.ProviderAdapterV2Event,
           ProviderAdapter.ProviderAdapterEventStreamError
         >();
+        // Realtime voice notifications are separate from turn events: a call can outlive a turn.
+        const realtimeEvents = yield* Queue.unbounded<
+          ProviderAdapter.ProviderAdapterV2RealtimeEvent
+        >();
+        yield* client.awaitTermination.pipe(
+          Effect.catch(() => Effect.void),
+          Effect.andThen(Queue.end(realtimeEvents)),
+          Effect.forkScoped,
+        );
         // Drain final notifications before the session manager retires the dead process.
         // Queue.fail lets readers take items already buffered before they see the failure.
         yield* client.awaitTermination.pipe(
@@ -4396,6 +4405,54 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           };
           return { node, request, turnItem };
         });
+
+        // Realtime voice frames travel to `voice.subscribe` callers instead of the turn projection.
+        const emitRealtimeEvent = (method: string, payload: unknown) =>
+          Queue.offer(realtimeEvents, {
+            type: method.slice("thread/realtime/".length),
+            payload,
+          }).pipe(Effect.asVoid);
+
+        yield* client.handleServerNotification("thread/realtime/started", (payload) =>
+          emitRealtimeEvent("thread/realtime/started", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/sdp", (payload) =>
+          emitRealtimeEvent("thread/realtime/sdp", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/transcript/delta", (payload) =>
+          emitRealtimeEvent("thread/realtime/transcript/delta", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/transcript/done", (payload) =>
+          emitRealtimeEvent("thread/realtime/transcript/done", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/outputAudio/delta", (payload) =>
+          emitRealtimeEvent("thread/realtime/outputAudio/delta", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/itemAdded", (payload) =>
+          emitRealtimeEvent("thread/realtime/itemAdded", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/item/started", (payload) =>
+          emitRealtimeEvent("thread/realtime/item/started", payload),
+        );
+        yield* client.handleServerNotification(
+          "thread/realtime/item/transcript/delta",
+          (payload) => emitRealtimeEvent("thread/realtime/item/transcript/delta", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/item/completed", (payload) =>
+          emitRealtimeEvent("thread/realtime/item/completed", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/error", (payload) =>
+          emitRealtimeEvent("thread/realtime/error", payload),
+        );
+        yield* client.handleServerNotification("thread/realtime/closed", (payload) =>
+          emitRealtimeEvent("thread/realtime/closed", payload),
+        );
+        // Newer app-servers may add realtime methods the generated schema does not know yet.
+        yield* client.handleUnknownServerNotification((method, params) =>
+          method.startsWith("thread/realtime/")
+            ? emitRealtimeEvent(method, params)
+            : Effect.void,
+        );
 
         yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
           Effect.gen(function* () {
@@ -7045,6 +7102,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          realtimeEvents: Stream.fromQueue(realtimeEvents),
           canReuseContextUsage: canReuseCodexContextUsage,
           // Idle release can beat delayed subagent resumes: Codex reports them completed between turns with no resume-expected signal.
           hasPendingBackgroundWork: Effect.gen(function* () {
@@ -7836,6 +7894,50 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             ),
           ),
           mcpApps,
+          startRealtime: Effect.fn("CodexAdapterV2.startRealtime")(
+            function* (realtimeInput) {
+              const threadId = yield* getNativeThreadId(realtimeInput.providerThread);
+              yield* ensureInitialized.pipe(
+                Effect.andThen(
+                  client.raw.request("thread/realtime/start", {
+                    threadId,
+                    outputModality: "audio",
+                    transport: { type: "webrtc", sdp: realtimeInput.sdp },
+                    ...(realtimeInput.prompt ? { prompt: realtimeInput.prompt } : {}),
+                    ...(realtimeInput.voice ? { voice: realtimeInput.voice } : {}),
+                  }),
+                ),
+              );
+            },
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Failed to start Codex realtime voice.",
+                  payload: cause,
+                }),
+            ),
+          ),
+          stopRealtime: Effect.fn("CodexAdapterV2.stopRealtime")(
+            function* (realtimeInput) {
+              const threadId = yield* getNativeThreadId(realtimeInput.providerThread);
+              yield* ensureInitialized.pipe(
+                Effect.andThen(
+                  client.raw.request("thread/realtime/stop", {
+                    threadId,
+                  }),
+                ),
+              );
+            },
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Failed to stop Codex realtime voice.",
+                  payload: cause,
+                }),
+            ),
+          ),
           readThreadSnapshot: Effect.fn("CodexAdapterV2.readThreadSnapshot")(
             function* (threadInput) {
               const threadId = yield* getNativeThreadId(threadInput.providerThread);
