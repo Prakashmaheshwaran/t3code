@@ -1864,8 +1864,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const realtimeEvents =
           yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2RealtimeEvent>();
         yield* client.awaitTermination.pipe(
-          Effect.catch(() => Effect.void),
-          Effect.andThen(Queue.end(realtimeEvents)),
+          Effect.ignore,
+          Effect.andThen(Queue.shutdown(realtimeEvents)),
           Effect.forkScoped,
         );
         // Drain final notifications before the session manager retires the dead process.
