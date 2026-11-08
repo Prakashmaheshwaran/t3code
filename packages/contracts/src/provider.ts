@@ -48,3 +48,39 @@ export class ProviderUploadFeedbackError extends Schema.TaggedError<ProviderUplo
     return `Failed to upload feedback for thread ${this.threadId}.`;
   }
 }
+
+export const VoiceCallStartInput = Schema.Struct({
+  threadId: ThreadId,
+  /** Browser SDP offer for the WebRTC audio transport. */
+  sdp: TrimmedNonEmptyString,
+  prompt: Schema.optional(TrimmedNonEmptyString),
+  voice: Schema.optional(TrimmedNonEmptyString),
+});
+export type VoiceCallStartInput = typeof VoiceCallStartInput.Type;
+
+export const VoiceCallStopInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type VoiceCallStopInput = typeof VoiceCallStopInput.Type;
+
+export const VoiceCallSubscribeInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type VoiceCallSubscribeInput = typeof VoiceCallSubscribeInput.Type;
+
+/** One raw `thread/realtime/*` notification; `type` omits the `thread/realtime/` prefix. */
+export const VoiceCallStreamEvent = Schema.Struct({
+  type: Schema.String,
+  payload: Schema.Unknown,
+});
+export type VoiceCallStreamEvent = typeof VoiceCallStreamEvent.Type;
+
+export class VoiceCallError extends Schema.TaggedError<VoiceCallError>()("VoiceCallError", {
+  threadId: ThreadId,
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {
+  override get message(): string {
+    return this.detail;
+  }
+}
