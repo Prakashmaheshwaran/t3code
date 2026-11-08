@@ -98,7 +98,7 @@ function VoiceCallWidgetForThread(props: { readonly threadRef: ScopedThreadRef }
   const captionRef = useRef("");
   const logID = useRef(0);
 
-  const active = state === "connecting" || state === "live" || state === "error";
+  const active = state === "connecting" || state === "live";
 
   const release = useStableCallback(() => {
     peerRef.current?.close();
