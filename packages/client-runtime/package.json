@@ -243,6 +243,10 @@
       "types": "./src/state/preview.ts",
       "default": "./src/state/preview.ts"
     },
+    "./state/voice": {
+      "types": "./src/state/voice.ts",
+      "default": "./src/state/voice.ts"
+    },
     "./state/projects": {
       "types": "./src/state/projects.ts",
       "default": "./src/state/projects.ts"
