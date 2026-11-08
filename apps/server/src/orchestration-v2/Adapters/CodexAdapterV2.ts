@@ -1853,12 +1853,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ProviderAdapter.ProviderAdapterEventStreamError
         >();
         // Realtime voice notifications are separate from turn events: a call can outlive a turn.
-        const realtimeEvents = yield* Queue.unbounded<
-          ProviderAdapter.ProviderAdapterV2RealtimeEvent
-        >();
+        const realtimeEvents =
+          yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2RealtimeEvent>();
         yield* client.awaitTermination.pipe(
-          Effect.catch(() => Effect.void),
-          Effect.andThen(Queue.end(realtimeEvents)),
+          Effect.ignore,
+          Effect.andThen(Queue.shutdown(realtimeEvents)),
           Effect.forkScoped,
         );
         // Drain final notifications before the session manager retires the dead process.
@@ -4434,9 +4433,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         yield* client.handleServerNotification("thread/realtime/item/started", (payload) =>
           emitRealtimeEvent("thread/realtime/item/started", payload),
         );
-        yield* client.handleServerNotification(
-          "thread/realtime/item/transcript/delta",
-          (payload) => emitRealtimeEvent("thread/realtime/item/transcript/delta", payload),
+        yield* client.handleServerNotification("thread/realtime/item/transcript/delta", (payload) =>
+          emitRealtimeEvent("thread/realtime/item/transcript/delta", payload),
         );
         yield* client.handleServerNotification("thread/realtime/item/completed", (payload) =>
           emitRealtimeEvent("thread/realtime/item/completed", payload),
@@ -4449,9 +4447,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
         // Newer app-servers may add realtime methods the generated schema does not know yet.
         yield* client.handleUnknownServerNotification((method, params) =>
-          method.startsWith("thread/realtime/")
-            ? emitRealtimeEvent(method, params)
-            : Effect.void,
+          method.startsWith("thread/realtime/") ? emitRealtimeEvent(method, params) : Effect.void,
         );
 
         yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
