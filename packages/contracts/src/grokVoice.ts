@@ -32,6 +32,8 @@ export const GrokVoiceSentPrompt = Schema.Struct({
   threadId: Schema.String,
   title: Schema.String,
   instruction: Schema.String,
+  /** Queued behind the thread's current run, whose result is not this request's. */
+  queued: Schema.optionalKey(Schema.Boolean),
 });
 export type GrokVoiceSentPrompt = typeof GrokVoiceSentPrompt.Type;
 

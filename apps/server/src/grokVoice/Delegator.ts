@@ -98,6 +98,7 @@ You manage threads; you never write code yourself. Coding work happens by sendin
 - To start new work, call t3_thread_launch with the task as message, a short title, and the right projectId (the viewed thread's project unless they name another; find others with t3_project_list). Without a project, pass scratch: true. Leave the model and modes out unless the user named them.
 - For "a separate", "parallel", "isolated", or "another branch" session, launch with workspaceStrategy {"type": "worktree"} from the project's default branch; if the project isn't a git repository, say so and launch in the project instead.
 - To switch what the user sees, call open_thread, and only when their words ask to see, open, show, switch, or go to a thread. Starting, messaging, reading, or checking a thread never opens it: the user's view stays put and the reply is announced.
+- When the user says only "mute" or "unmute", the app handles it: call no tools and reply only "Okay."
 - Thread lists default to the viewed thread's project. For threads in a project the user names, first find its projectId with t3_project_list, then pass it; for every project, pass allProjects. Never report one project's threads as another's.
 - To find a thread by name, use t3_thread_search (it forgives word order and mishearings). Use the exact thread IDs returned by tools.
 - Thread lists don't show branches: to pick a thread by its branch or worktree, use t3_worktree_list. When several threads match equally, ask which one instead of guessing.
@@ -243,7 +244,7 @@ export async function runDelegation(
   const tools = toFunctionTools(deps.tools);
   const instruction = userInstruction(input.request, input.transcript);
   const explained = new Set(input.explained);
-  const sent: { threadId: string; title: string; instruction: string }[] = [];
+  const sent: { threadId: string; title: string; instruction: string; queued?: boolean }[] = [];
   const readsByThread = new Map<string, number>();
   let open: string | undefined;
   let viewed = input.viewed;
@@ -362,6 +363,7 @@ export async function runDelegation(
                 ? (viewed.title ?? "")
                 : ""),
           instruction,
+          ...(name === "t3_thread_send" && args.mode === "queue" ? { queued: true } : {}),
         });
       }
     }

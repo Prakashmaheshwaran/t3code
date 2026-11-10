@@ -124,6 +124,11 @@ export class GrokRealtimeCall {
     };
   }
 
+  /** The microphone the call hears, for listening locally while muted. */
+  get microphone() {
+    return this.stream;
+  }
+
   setMuted(muted: boolean) {
     this.muted = muted;
   }

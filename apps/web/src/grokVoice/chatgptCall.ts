@@ -24,6 +24,23 @@ export interface ChatGptCallCallbacks {
   readonly onStatus: (status: "live" | "closed", detail?: string) => void;
   readonly onEvent: (event: ChatGptVoiceEvent) => void;
   readonly onLevel: (level: number) => void;
+  /** Each finished user utterance, as GPT-Live heard it. */
+  readonly onUtterance?: (text: string) => void;
+}
+
+// GPT-Live caps context appends at 500 tokens; bytes are a conservative stand-in.
+function speakableChunks(text: string) {
+  const parts: string[] = [];
+  let current = "";
+  for (const character of text) {
+    if (new TextEncoder().encode(current + character).length > 500) {
+      parts.push(current);
+      current = "";
+    }
+    current += character;
+  }
+  if (current) parts.push(current);
+  return parts;
 }
 
 const ICE_WAIT_MS = 3000;
@@ -39,6 +56,9 @@ export class ChatGptCall {
   private levelTimer: ReturnType<typeof setInterval> | undefined;
   private callId: string | undefined;
   private stopped = false;
+  private utterance = "";
+  private lastDelegation: string | undefined;
+  private sentEvents = 0;
   private muted = false;
 
   constructor(prepared: PreparedConnection, callbacks: ChatGptCallCallbacks) {
@@ -107,21 +127,51 @@ export class ChatGptCall {
     void this.follow();
   }
 
+  /** The microphone the call hears, for listening locally while muted. */
+  get microphone() {
+    return this.stream;
+  }
+
   setMuted(muted: boolean) {
     this.muted = muted;
     for (const track of this.stream?.getAudioTracks() ?? []) track.enabled = !muted;
-    if (this.channel?.readyState === "open")
-      this.channel.send(
-        JSON.stringify({ type: muted ? "session.input_audio.mute" : "session.input_audio.unmute" }),
-      );
+    // GPT-Live's own pause; it rejects other mute events, and silence alone still holds the turn.
+    this.sendLive({ type: muted ? "input_audio.pause" : "input_audio.resume" });
   }
 
-  /** News for the voice agent to tell the user; it can never trigger a delegation. */
+  /**
+   * News for the voice agent to tell the user; it can never trigger a delegation. It goes over
+   * the call's own channel: Codex's appendSpeech is only spoken inside a pending handoff, and
+   * once any handoff happened GPT-Live ignores session context, so news joins the last one.
+   */
   announce(text: string) {
+    if (this.channel?.readyState === "open") {
+      for (const part of speakableChunks(text))
+        this.sendLive(
+          this.lastDelegation
+            ? {
+                type: "delegation.context.append",
+                delegation_item_id: this.lastDelegation,
+                channel: "speakable",
+                content: [{ type: "input_text", text: part }],
+              }
+            : {
+                type: "session.context.append",
+                channel: "commentary",
+                content: [{ type: "input_text", text: part }],
+              },
+        );
+      return;
+    }
     if (!this.callId) return;
     void runEnvironmentSpeech(
       chatGptVoiceContext(this.prepared, this.callId, { announce: text }),
     ).catch(() => {});
+  }
+
+  private sendLive(event: Record<string, unknown>) {
+    if (this.channel?.readyState === "open")
+      this.channel.send(JSON.stringify({ event_id: `t3_${++this.sentEvents}`, ...event }));
   }
 
   updateViewed(viewed: GrokVoiceViewed | undefined) {
@@ -144,7 +194,12 @@ export class ChatGptCall {
   }
 
   private onLiveEvent(data: string) {
-    let event: { type?: string; turn?: { role?: string } };
+    let event: {
+      type?: string;
+      turn?: { role?: string; transcript?: string };
+      item?: { text?: string; id?: string };
+      error?: { message?: string };
+    };
     try {
       event = JSON.parse(data) as typeof event;
     } catch {
@@ -152,10 +207,20 @@ export class ChatGptCall {
     }
     const speaking = (who: "user" | "assistant" | null) =>
       this.callbacks.onEvent({ type: "speaking", who });
-    if (event.type === "input_transcript.added") speaking("user");
-    else if (event.type === "output_transcript.added") speaking("assistant");
-    else if (event.type === "turn.done" || event.type === "output_audio_buffer.cleared")
+    if (event.type === "delegation.created" && event.item?.id) this.lastDelegation = event.item.id;
+    else if (event.type === "input_transcript.added") {
+      this.utterance += event.item?.text ?? "";
+      speaking("user");
+    } else if (event.type === "output_transcript.added") speaking("assistant");
+    else if (event.type === "turn.done" || event.type === "output_audio_buffer.cleared") {
       speaking(null);
+      if (event.turn?.role === "user") {
+        const said = (event.turn.transcript ?? this.utterance).trim();
+        this.utterance = "";
+        if (said) this.callbacks.onUtterance?.(said);
+      }
+    } else if (event.type === "error" && import.meta.env.DEV)
+      console.warn("[chatgpt-voice] Live rejected an event", event.error?.message);
   }
 
   private endOnServer() {

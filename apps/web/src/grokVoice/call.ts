@@ -23,6 +23,7 @@ import { environmentThreadShells } from "../state/threads";
 import { lastAgentReply, openThread, readViewedThreadRef, threadStatus } from "./host";
 import { liveInstructions, liveTools } from "./voiceAgent";
 import { ChatGptCall } from "./chatgptCall";
+import { isMuteCommand, listenForUnmute, type UnmuteListener } from "./unmuteListener";
 import { GrokRealtimeCall } from "./realtime";
 
 const GROK_VOICES = ["Ara", "Eve", "Leo", "Rex", "Sal"] as const;
@@ -38,6 +39,9 @@ const DELEGATOR_MODEL_KEY = "t3code:grok-voice:chatgpt-delegator-model";
 const MAX_LINES = 40;
 const ANNOUNCE_CHARS = 800;
 const MAX_DELTA_LINES = 20;
+const DELEGATION_HOLD_MS = 20_000;
+// A moment of silence after an answer, so news doesn't ride on its tail.
+const QUIET_MS = 1200;
 
 export interface CallLine {
   readonly who: "you" | "grok" | "note";
@@ -114,13 +118,54 @@ interface VoiceCall {
   readonly announce: (text: string) => void;
   readonly setMuted: (muted: boolean) => void;
   readonly stop: () => void;
+  readonly microphone: MediaStream | undefined;
 }
 
 let active: {
   call: VoiceCall;
   dispose: () => void;
   heardUser: (text: string) => void;
+  prepared: NonNullable<ReturnType<typeof readPreparedConnection>>;
+  unmute?: UnmuteListener | undefined;
 } | null = null;
+
+/** Mutes or unmutes the call; while muted, listens locally for "unmute". */
+function setCallMuted(muted: boolean, byVoice = false) {
+  const call = active;
+  if (!call || useGrokVoiceStore.getState().muted === muted) return;
+  call.call.setMuted(muted);
+  set({ muted });
+  call.unmute?.stop();
+  call.unmute = undefined;
+  if (!muted) {
+    if (byVoice) addLine({ who: "note", text: "Unmuted." });
+    return;
+  }
+  void listenForUnmute({
+    prepared: call.prepared,
+    microphone: call.call.microphone,
+    onUnmute: () => setCallMuted(false, true),
+    onFailed: () =>
+      addLine({ who: "note", text: 'Stopped listening for "unmute". Click the mic to unmute.' }),
+  }).then((listening) => {
+    if (active !== call || !useGrokVoiceStore.getState().muted) {
+      listening?.listener.stop();
+      return;
+    }
+    call.unmute = listening?.listener;
+    addLine({
+      who: "note",
+      text: listening
+        ? `Muted. Say "unmute" to come back${listening.via === "browser" ? " (heard through Chrome's speech recognition)" : ""}.`
+        : "Muted. Voice unmute isn't available here, so click the mic to unmute.",
+    });
+  });
+}
+
+/** A spoken "mute" mutes the call; the model never needs to act on it. */
+function heardCommand(text: string) {
+  if (isMuteCommand(text)) setCallMuted(true, true);
+}
 
 export function installGrokVoice(appRouter: AnyRouter) {
   router = appRouter;
@@ -164,9 +209,7 @@ export function setVoiceProvider(provider: VoiceProvider) {
 }
 
 export function toggleGrokVoiceMute() {
-  const muted = !useGrokVoiceStore.getState().muted;
-  active?.call.setMuted(muted);
-  set({ muted });
+  setCallMuted(!useGrokVoiceStore.getState().muted);
 }
 
 export function sendGrokVoiceText(text: string) {
@@ -263,7 +306,12 @@ function watchThreads(onNews: (note: string, detail: string) => void) {
         ref,
         prompt,
         // A run that already finished, even one the delegator waited on and reported, is old news.
-        baselineRunId: shell?.runtime?.activeRunId ? null : (shell?.latestRun?.runId ?? null),
+        // Queued work waits behind the running run, whose result answers someone else's request.
+        baselineRunId: shell?.runtime?.activeRunId
+          ? prompt.queued
+            ? shell.runtime.activeRunId
+            : null
+          : (shell?.latestRun?.runId ?? null),
         announced: null,
         settleAt: Date.now() + WATCH_GRACE_MS,
       });
@@ -295,14 +343,42 @@ async function startGrokVoiceCall() {
   }
 
   let ended = false;
-  // News waits until nobody is talking and no delegation is running, as OpenCode's reply gate does.
+  // Each provider's branch below installs its call here; news is spoken through it.
+  let announcer: VoiceCall | null = null;
+  // News waits until nobody is talking and no delegation is running, as OpenCode's reply gate
+  // does, but never longer than DELEGATION_HOLD_MS behind a delegation that never reports back.
   const news: string[] = [];
+  let newsSince = 0;
+  let lastBusyAt = 0;
+  let recheck: ReturnType<typeof setTimeout> | undefined;
+  // News that lands while the agent answers is merged into that answer and lost, so it waits
+  // for quiet: nobody speaking and no delegation running, for at most DELEGATION_HOLD_MS.
   const flushNews = () => {
     const state = useGrokVoiceStore.getState();
-    if (ended || state.speaking === "user" || state.delegating > 0) return;
-    for (const detail of news.splice(0)) call.announce(detail);
+    if (ended || !announcer || news.length === 0) return;
+    newsSince ||= Date.now();
+    const busy = state.speaking !== null || state.delegating > 0;
+    const wait = busy ? newsSince + DELEGATION_HOLD_MS - Date.now() : QUIET_MS - quietFor();
+    if (wait > 0) {
+      clearTimeout(recheck);
+      recheck = setTimeout(flushNews, Math.min(wait, QUIET_MS));
+      return;
+    }
+    newsSince = 0;
+    for (const detail of news.splice(0)) announcer.announce(detail);
   };
-  const unsubscribeGate = useGrokVoiceStore.subscribe(flushNews);
+  const quietFor = () => {
+    noteBusy();
+    return Date.now() - lastBusyAt;
+  };
+  const noteBusy = () => {
+    const state = useGrokVoiceStore.getState();
+    if (state.speaking !== null || state.delegating > 0) lastBusyAt = Date.now();
+  };
+  const unsubscribeGate = useGrokVoiceStore.subscribe(() => {
+    noteBusy();
+    flushNews();
+  });
   const watcher = watchThreads((note, detail) => {
     if (ended) return;
     addLine({ who: "note", text: note });
@@ -374,11 +450,15 @@ async function startGrokVoiceCall() {
       },
       onEvent,
       onLevel,
+      onUtterance: heardCommand,
     });
+    announcer = call;
     const stopFollowing = appRouter.subscribe("onResolved", () => call.updateViewed(viewed()));
     const dispose = () => {
       if (ended) return;
       ended = true;
+      clearTimeout(recheck);
+      active?.unmute?.stop();
       stopFollowing();
       unsubscribeGate();
       watcher.dispose();
@@ -386,7 +466,7 @@ async function startGrokVoiceCall() {
       active = null;
       set({ status: "idle", speaking: null, delegating: 0, level: 0 });
     };
-    active = { call, dispose, heardUser };
+    active = { call, dispose, heardUser, prepared };
     try {
       const current = viewed();
       await call.start({
@@ -409,7 +489,10 @@ async function startGrokVoiceCall() {
         if (detail) set({ error: detail });
       }
     },
-    onUserTranscript: (text) => heardUser(text),
+    onUserTranscript: (text) => {
+      heardUser(text);
+      heardCommand(text);
+    },
     onAssistantTranscript: (text) => {
       log.push(`Voice agent: ${text}`);
       addLine({ who: "grok", text });
@@ -461,13 +544,16 @@ async function startGrokVoiceCall() {
   const dispose = () => {
     if (ended) return;
     ended = true;
+    clearTimeout(recheck);
+    active?.unmute?.stop();
     unsubscribeGate();
     watcher.dispose();
     call.stop();
     active = null;
     set({ status: "idle", speaking: null, delegating: 0, level: 0 });
   };
-  active = { call, dispose, heardUser };
+  active = { call, dispose, heardUser, prepared };
+  announcer = call;
 
   try {
     const session = await runEnvironmentSpeech(createGrokVoiceSession(prepared));
