@@ -16,6 +16,13 @@ import {
   GrokVoiceSession,
 } from "./grokVoice.ts";
 import {
+  ChatGptVoiceContextRequest,
+  ChatGptVoiceError,
+  ChatGptVoiceEvents,
+  ChatGptVoiceStartRequest,
+  ChatGptVoiceStartResult,
+} from "./chatgptVoice.ts";
+import {
   AuthAccessTokenResult,
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
@@ -941,6 +948,41 @@ export class EnvironmentVoiceHttpApi extends HttpApiGroup.make("voice")
       payload: GrokVoiceDelegateRequest,
       success: GrokVoiceDelegateResult,
       error: [...EnvironmentScopedOperationErrors, GrokVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("chatgptStart", "/api/voice/chatgpt/calls", {
+      headers: OptionalBearerHeaders,
+      payload: ChatGptVoiceStartRequest,
+      success: ChatGptVoiceStartResult,
+      error: [...EnvironmentScopedOperationErrors, ChatGptVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // Long poll: waits up to 25 seconds for events after `after`.
+    HttpApiEndpoint.get("chatgptEvents", "/api/voice/chatgpt/calls/:callId/events", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      query: Schema.Struct({ after: Schema.NumberFromString }),
+      success: ChatGptVoiceEvents,
+      error: [...EnvironmentScopedOperationErrors, ChatGptVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("chatgptContext", "/api/voice/chatgpt/calls/:callId/context", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      payload: ChatGptVoiceContextRequest,
+      success: HttpApiSchema.NoContent,
+      error: [...EnvironmentScopedOperationErrors, ChatGptVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("chatgptEnd", "/api/voice/chatgpt/calls/:callId/end", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      success: HttpApiSchema.NoContent,
+      error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

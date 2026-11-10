@@ -74,12 +74,23 @@ export function parseGrokAuth(text: string): GrokLogin | undefined {
 const grokAuthPath = (path: Path.Path) =>
   path.join(process.env.GROK_HOME?.trim() || path.join(NodeOS.homedir(), ".grok"), "auth.json");
 
+export type DelegatorResponder = (body: {
+  instructions: string;
+  input: ReadonlyArray<unknown>;
+  tools: ReadonlyArray<unknown>;
+}) => Effect.Effect<ReadonlyArray<unknown>, { readonly message: string }>;
+
 export class GrokVoice extends Context.Service<
   GrokVoice,
   {
     readonly session: Effect.Effect<GrokVoiceSession, GrokVoiceError>;
     readonly delegate: (
       request: GrokVoiceDelegateRequest,
+    ) => Effect.Effect<GrokVoiceDelegateResult, GrokVoiceError>;
+    /** The same stateless delegator, thinking with another provider's Responses backend. */
+    readonly delegateWith: (
+      request: GrokVoiceDelegateRequest,
+      respond: DelegatorResponder,
     ) => Effect.Effect<GrokVoiceDelegateResult, GrokVoiceError>;
   }
 >()("t3/grokVoice/GrokVoice") {}
@@ -185,9 +196,8 @@ export const layer = Layer.effect(
 
     // The delegator is an outside MCP client of this same server, like `t3 thread`: it gets
     // T3 Code's own tools without being a thread, and its credential ends with the request.
-    const delegate = Effect.fn("GrokVoice.delegate")(
-      function* (request: GrokVoiceDelegateRequest) {
-        yield* login();
+    const delegateWith = Effect.fn("GrokVoice.delegateWith")(
+      function* (request: GrokVoiceDelegateRequest, respond: DelegatorResponder) {
         const state = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.mapError(() => unavailable("Couldn't find this server's address.")),
@@ -218,7 +228,7 @@ export const layer = Layer.effect(
             runDelegation(
               {
                 tools,
-                respond: (body) => runPromise(responses(body)),
+                respond: (body) => runPromise(respond(body)),
                 call: (name, args) => runPromise(mcp.call(name, args)),
                 approvals: {
                   list: (threadId) =>
@@ -275,6 +285,9 @@ export const layer = Layer.effect(
         ),
     );
 
-    return GrokVoice.of({ session, delegate });
+    const delegate = (request: GrokVoiceDelegateRequest) =>
+      login().pipe(Effect.andThen(delegateWith(request, responses)));
+
+    return GrokVoice.of({ session, delegate, delegateWith });
   }),
 );

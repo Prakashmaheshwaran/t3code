@@ -8,19 +8,21 @@ export const GrokVoiceSession = Schema.Struct({
 });
 export type GrokVoiceSession = typeof GrokVoiceSession.Type;
 
+/** The thread on the user's screen, which "this thread" means in a voice request. */
+export const GrokVoiceViewed = Schema.Struct({
+  threadId: Schema.String,
+  title: Schema.optionalKey(Schema.String),
+  projectId: Schema.optionalKey(Schema.String),
+});
+export type GrokVoiceViewed = typeof GrokVoiceViewed.Type;
+
 /** One voice request for the stateless delegator, which acts through this server's MCP tools. */
 export const GrokVoiceDelegateRequest = Schema.Struct({
   /** What the voice agent heard the user ask. */
   request: Schema.String,
   /** Both sides of the call since the previous delegation, as `User: …` / `Voice agent: …` lines. */
   transcript: Schema.Array(Schema.String),
-  viewed: Schema.optionalKey(
-    Schema.Struct({
-      threadId: Schema.String,
-      title: Schema.optionalKey(Schema.String),
-      projectId: Schema.optionalKey(Schema.String),
-    }),
-  ),
+  viewed: Schema.optionalKey(GrokVoiceViewed),
   /** Threads that already got the full voice-delegation header in this call. */
   explained: Schema.Array(Schema.String),
 });

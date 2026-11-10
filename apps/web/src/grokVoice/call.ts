@@ -1,6 +1,12 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { createGrokVoiceSession, grokVoiceDelegate } from "@t3tools/client-runtime/voice-input";
-import type { EnvironmentId, GrokVoiceSentPrompt, ScopedThreadRef } from "@t3tools/contracts";
+import {
+  CHATGPT_VOICES,
+  type ChatGptVoiceEvent,
+  type EnvironmentId,
+  type GrokVoiceSentPrompt,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import type { AnyRouter } from "@tanstack/react-router";
 import { create } from "zustand";
 
@@ -12,10 +18,18 @@ import { liveShellEnvironmentIdsAtom } from "../state/shell";
 import { environmentThreadShells } from "../state/threads";
 import { lastAgentReply, openThread, readViewedThreadRef, threadStatus } from "./host";
 import { liveInstructions, liveTools } from "./voiceAgent";
+import { ChatGptCall } from "./chatgptCall";
 import { GrokRealtimeCall } from "./realtime";
 
-export const GROK_VOICES = ["Ara", "Eve", "Leo", "Rex", "Sal"] as const;
+const GROK_VOICES = ["Ara", "Eve", "Leo", "Rex", "Sal"] as const;
+export type VoiceProvider = "grok" | "chatgpt";
+export const VOICE_PROVIDERS: Record<VoiceProvider, { label: string; voices: readonly string[] }> =
+  {
+    grok: { label: "Grok", voices: GROK_VOICES },
+    chatgpt: { label: "ChatGPT", voices: CHATGPT_VOICES },
+  };
 const VOICE_KEY = "t3code:grok-voice:voice";
+const PROVIDER_KEY = "t3code:grok-voice:provider";
 const MAX_LINES = 40;
 const ANNOUNCE_CHARS = 800;
 const MAX_DELTA_LINES = 20;
@@ -33,15 +47,34 @@ interface GrokVoiceState {
   readonly muted: boolean;
   readonly delegating: number;
   readonly level: number;
+  readonly provider: VoiceProvider;
   readonly voice: string;
+  /** Grok calls take typed input too; ChatGPT calls are speech only. */
+  readonly canType: boolean;
 }
 
-function readVoice() {
+function readStored(key: string) {
   try {
-    const stored = localStorage.getItem(VOICE_KEY);
-    if (stored && (GROK_VOICES as readonly string[]).includes(stored)) return stored;
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
   } catch {}
-  return "Ara";
+}
+
+function readProvider(): VoiceProvider {
+  return readStored(PROVIDER_KEY) === "chatgpt" ? "chatgpt" : "grok";
+}
+
+function readVoice(provider: VoiceProvider) {
+  const voices = VOICE_PROVIDERS[provider].voices;
+  const stored = readStored(provider === "grok" ? VOICE_KEY : `${VOICE_KEY}:${provider}`);
+  return stored && voices.includes(stored) ? stored : voices[0]!;
 }
 
 export const useGrokVoiceStore = create<GrokVoiceState>()(() => ({
@@ -52,7 +85,9 @@ export const useGrokVoiceStore = create<GrokVoiceState>()(() => ({
   muted: false,
   delegating: 0,
   level: 0,
-  voice: readVoice(),
+  provider: readProvider(),
+  voice: readVoice(readProvider()),
+  canType: false,
 }));
 
 const set = useGrokVoiceStore.setState;
@@ -60,8 +95,15 @@ const addLine = (line: CallLine) =>
   set((state) => ({ lines: [...state.lines, line].slice(-MAX_LINES) }));
 
 let router: AnyRouter | null = null;
+interface VoiceCall {
+  readonly say?: (text: string) => void;
+  readonly announce: (text: string) => void;
+  readonly setMuted: (muted: boolean) => void;
+  readonly stop: () => void;
+}
+
 let active: {
-  call: GrokRealtimeCall;
+  call: VoiceCall;
   dispose: () => void;
   heardUser: (text: string) => void;
 } | null = null;
@@ -71,10 +113,14 @@ export function installGrokVoice(appRouter: AnyRouter) {
 }
 
 export function setGrokVoice(voice: string) {
-  try {
-    localStorage.setItem(VOICE_KEY, voice);
-  } catch {}
+  const { provider } = useGrokVoiceStore.getState();
+  writeStored(provider === "grok" ? VOICE_KEY : `${VOICE_KEY}:${provider}`, voice);
   set({ voice });
+}
+
+export function setVoiceProvider(provider: VoiceProvider) {
+  writeStored(PROVIDER_KEY, provider);
+  set({ provider, voice: readVoice(provider) });
 }
 
 export function toggleGrokVoiceMute() {
@@ -85,7 +131,7 @@ export function toggleGrokVoiceMute() {
 
 export function sendGrokVoiceText(text: string) {
   const trimmed = text.trim();
-  if (!trimmed || !active) return;
+  if (!trimmed || !active?.call.say) return;
   active.heardUser(trimmed);
   active.call.say(trimmed);
 }
@@ -188,6 +234,7 @@ function watchThreads(onNews: (note: string, detail: string) => void) {
 async function startGrokVoiceCall() {
   if (useGrokVoiceStore.getState().status !== "idle" || !router) return;
   const appRouter = router;
+  const { provider } = useGrokVoiceStore.getState();
   set({
     status: "connecting",
     error: null,
@@ -195,6 +242,7 @@ async function startGrokVoiceCall() {
     muted: false,
     delegating: 0,
     speaking: null,
+    canType: provider === "grok",
   });
   const environmentId = pickEnvironment();
   const prepared = environmentId ? readPreparedConnection(environmentId) : null;
@@ -242,6 +290,72 @@ async function startGrokVoiceCall() {
       ...(shell?.projectId ? { projectId: shell.projectId } : {}),
     };
   };
+  const delegated = (result: { open?: string; sent: ReadonlyArray<GrokVoiceSentPrompt> }) => {
+    for (const prompt of result.sent)
+      watcher.watch(scopeThreadRef(environmentId, prompt.threadId as never), prompt);
+    if (result.open)
+      void openThread(appRouter, environmentId, result.open).then((opened) => {
+        if (!opened) addLine({ who: "note", text: "That thread didn't show up to open." });
+      });
+  };
+  const onLevel = (level: number) => {
+    const rounded = Math.min(1, Math.round(level * 8) / 8);
+    if (rounded !== useGrokVoiceStore.getState().level) set({ level: rounded });
+  };
+
+  if (provider === "chatgpt") {
+    // The server runs this call's delegations; the client follows along and shows the results.
+    const onEvent = (event: ChatGptVoiceEvent) => {
+      switch (event.type) {
+        case "speaking":
+          return set({ speaking: event.who });
+        case "transcript":
+          return addLine({ who: event.role === "user" ? "you" : "grok", text: event.text });
+        case "delegating":
+          return set((state) => ({ delegating: state.delegating + 1 }));
+        case "delegated":
+          set((state) => ({ delegating: Math.max(0, state.delegating - 1) }));
+          if (import.meta.env.DEV) console.info("[grok-voice] delegation", event);
+          return delegated(event);
+        case "note":
+          return addLine({ who: "note", text: event.text });
+      }
+    };
+    const call: ChatGptCall = new ChatGptCall(prepared, {
+      onStatus: (status, detail) => {
+        if (status === "live") set({ status: "live" });
+        if (status === "closed") {
+          dispose();
+          if (detail && detail !== "Hung up.") addLine({ who: "note", text: detail });
+        }
+      },
+      onEvent,
+      onLevel,
+    });
+    const stopFollowing = appRouter.subscribe("onResolved", () => call.updateViewed(viewed()));
+    const dispose = () => {
+      if (ended) return;
+      ended = true;
+      stopFollowing();
+      unsubscribeGate();
+      watcher.dispose();
+      call.stop();
+      active = null;
+      set({ status: "idle", speaking: null, delegating: 0, level: 0 });
+    };
+    active = { call, dispose, heardUser };
+    try {
+      const current = viewed();
+      await call.start({
+        voice: useGrokVoiceStore.getState().voice as (typeof CHATGPT_VOICES)[number],
+        ...(current ? { viewed: current } : {}),
+      });
+    } catch (error) {
+      dispose();
+      set({ error: errorMessage(error) });
+    }
+    return;
+  }
 
   const call: GrokRealtimeCall = new GrokRealtimeCall({
     onStatus: (status, detail) => {
@@ -258,10 +372,7 @@ async function startGrokVoiceCall() {
     },
     onSpeaking: (speaking) => set({ speaking }),
     onNote: (text) => addLine({ who: "note", text }),
-    onLevel: (level) => {
-      const rounded = Math.min(1, Math.round(level * 8) / 8);
-      if (rounded !== useGrokVoiceStore.getState().level) set({ level: rounded });
-    },
+    onLevel,
     onToolCall: ({ callId, name, args }) => {
       if (name === "end_call") {
         call.sendToolOutput(callId, { status: "ending" });
@@ -289,12 +400,7 @@ async function startGrokVoiceCall() {
         .then(
           (result) => {
             explained = [...result.explained];
-            for (const prompt of result.sent)
-              watcher.watch(scopeThreadRef(environmentId, prompt.threadId as never), prompt);
-            if (result.open)
-              void openThread(appRouter, environmentId, result.open).then((opened) => {
-                if (!opened) addLine({ who: "note", text: "That thread didn't show up to open." });
-              });
+            delegated(result);
             if (import.meta.env.DEV) console.info("[grok-voice] delegation", result);
             if (!ended) call.sendToolOutput(callId, { speech: result.speech });
           },

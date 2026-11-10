@@ -1649,8 +1649,8 @@ function OpenCommandPaletteDialog(props: {
   actionItems.push({
     kind: "action",
     value: "action:grok-voice-call",
-    searchTerms: ["voice", "call", "grok", "talk", "speak", "live", "hang up"],
-    title: "Start or end Grok voice call",
+    searchTerms: ["voice", "call", "grok", "chatgpt", "talk", "speak", "live", "hang up"],
+    title: "Start or end voice call",
     icon: <PhoneIcon className={ITEM_ICON_CLASS} />,
     shortcutCommand: "voice.call",
     run: async () => {

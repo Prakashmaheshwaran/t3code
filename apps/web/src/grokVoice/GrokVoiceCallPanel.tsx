@@ -6,7 +6,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Spinner } from "../components/ui/spinner";
 import {
-  GROK_VOICES,
+  VOICE_PROVIDERS,
   endGrokVoiceCall,
   sendGrokVoiceText,
   setGrokVoice,
@@ -18,9 +18,9 @@ const VISIBLE_LINES = 6;
 
 /** Floating call surface; renders nothing unless a call is on or just failed. */
 export function GrokVoiceCallPanel() {
-  const { status, error, lines, speaking, muted, delegating, level, voice } = useGrokVoiceStore(
-    useShallow((state) => state),
-  );
+  const { status, error, lines, speaking, muted, delegating, level, voice, provider, canType } =
+    useGrokVoiceStore(useShallow((state) => state));
+  const name = VOICE_PROVIDERS[provider].label;
   if (status === "idle" && !error) return null;
 
   const label =
@@ -29,7 +29,7 @@ export function GrokVoiceCallPanel() {
       : delegating > 0
         ? "Working on it…"
         : speaking === "assistant"
-          ? "Grok is speaking"
+          ? `${name} is speaking`
           : speaking === "user"
             ? "Listening"
             : muted
@@ -39,7 +39,7 @@ export function GrokVoiceCallPanel() {
   return (
     <div
       role="region"
-      aria-label="Grok voice call"
+      aria-label="Voice call"
       className="pointer-events-auto fixed right-4 bottom-4 z-50 flex w-80 flex-col gap-2 rounded-xl border bg-popover p-3 text-popover-foreground shadow-lg"
     >
       <div className="flex items-center gap-2">
@@ -54,7 +54,7 @@ export function GrokVoiceCallPanel() {
                 : "bg-muted-foreground",
           )}
         />
-        <span className="text-sm font-medium">Grok voice</span>
+        <span className="text-sm font-medium">{name} voice</span>
         <span className="text-xs text-muted-foreground" aria-live="polite">
           {status === "idle" ? "Ended" : label}
         </span>
@@ -87,7 +87,7 @@ export function GrokVoiceCallPanel() {
               )}
             >
               <span className="font-medium">
-                {line.who === "you" ? "You: " : line.who === "grok" ? "Grok: " : ""}
+                {line.who === "you" ? "You: " : line.who === "grok" ? `${name}: ` : ""}
               </span>
               {line.text}
             </li>
@@ -95,11 +95,11 @@ export function GrokVoiceCallPanel() {
         </ol>
       ) : status === "live" ? (
         <p className="text-xs text-muted-foreground">
-          Say what you want done. Grok hands it to your threads.
+          Say what you want done. {name} hands it to your threads.
         </p>
       ) : null}
 
-      {status === "live" ? (
+      {status === "live" && canType ? (
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -142,15 +142,15 @@ export function GrokVoiceCallPanel() {
       ) : (
         <div className="flex items-center gap-1 text-xs text-muted-foreground">
           Voice:
-          {GROK_VOICES.map((name) => (
+          {VOICE_PROVIDERS[provider].voices.slice(0, 5).map((option) => (
             <Button
-              key={name}
-              variant={name === voice ? "ghost" : "ghost-muted"}
+              key={option}
+              variant={option === voice ? "ghost" : "ghost-muted"}
               size="compact"
-              aria-pressed={name === voice}
-              onClick={() => setGrokVoice(name)}
+              aria-pressed={option === voice}
+              onClick={() => setGrokVoice(option)}
             >
-              {name}
+              {option}
             </Button>
           ))}
         </div>

@@ -7,7 +7,7 @@ import { toggleGrokVoiceCall, useGrokVoiceStore } from "./call";
 /** Starts or ends a Grok voice call from the composer, where touch devices can reach it. */
 export function GrokVoiceCallButton(props: { readonly shortcutLabel: string | null }) {
   const inCall = useGrokVoiceStore((state) => state.status !== "idle");
-  const label = inCall ? "End Grok voice call" : "Start Grok voice call";
+  const label = inCall ? "End voice call" : "Start voice call";
   return (
     <Tooltip>
       <TooltipTrigger

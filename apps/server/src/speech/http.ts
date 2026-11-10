@@ -23,6 +23,7 @@ import {
 import * as SpeechPostProcessing from "./postProcessing.ts";
 import * as CloudSpeech from "./CloudSpeech.ts";
 import * as GrokVoice from "../grokVoice/GrokVoice.ts";
+import * as ChatGptVoice from "../chatgptVoice/ChatGptVoice.ts";
 import * as SpeechService from "./SpeechService.ts";
 
 const MAX_TRANSCRIBE_BODY_BYTES = SpeechService.MAX_SPEECH_BYTES + SPEECH_MAX_OPTIONS_BYTES + 4;
@@ -61,6 +62,7 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
     const speech = yield* SpeechService.SpeechService;
     const cloud = yield* CloudSpeech.CloudSpeech;
     const grok = yield* GrokVoice.GrokVoice;
+    const chatgpt = yield* ChatGptVoice.ChatGptVoice;
     const postProcessing = yield* SpeechPostProcessing.SpeechPostProcessing;
     const guard = Effect.fnUntraced(function* (
       endpoint: string,
@@ -213,6 +215,34 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.voice.grokDelegate")(function* (args) {
           yield* guard(args.endpoint.name);
           return yield* grok.delegate(args.payload);
+        }),
+      )
+      .handle(
+        "chatgptStart",
+        Effect.fn("environment.voice.chatgptStart")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* chatgpt.start(args.payload);
+        }),
+      )
+      .handle(
+        "chatgptEvents",
+        Effect.fn("environment.voice.chatgptEvents")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* chatgpt.events(args.params.callId, args.query.after);
+        }),
+      )
+      .handle(
+        "chatgptContext",
+        Effect.fn("environment.voice.chatgptContext")(function* (args) {
+          yield* guard(args.endpoint.name);
+          yield* chatgpt.context(args.params.callId, args.payload);
+        }),
+      )
+      .handle(
+        "chatgptEnd",
+        Effect.fn("environment.voice.chatgptEnd")(function* (args) {
+          yield* guard(args.endpoint.name);
+          yield* chatgpt.end(args.params.callId);
         }),
       );
   }),

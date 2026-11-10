@@ -6,6 +6,8 @@ import { CloudSpeechError, SPEECH_STREAM_PATH } from "@t3tools/contracts";
 import type {
   CloudSpeechModelId,
   CloudSpeechProvider,
+  ChatGptVoiceContextRequest,
+  ChatGptVoiceStartRequest,
   GrokVoiceDelegateRequest,
   SettingsSecretValue,
   SpeechAcceleration,
@@ -323,4 +325,49 @@ export const grokVoiceDelegate = (
     timeoutMs: 150_000,
     path: (urls) => urls.grokDelegate(),
     run: ({ client, headers }) => client.grokDelegate({ headers, payload }),
+  });
+
+export const startChatGptVoiceCall = (
+  prepared: PreparedConnection,
+  payload: ChatGptVoiceStartRequest,
+) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    path: (urls) => urls.chatgptStart(),
+    run: ({ client, headers }) => client.chatgptStart({ headers, payload }),
+  });
+
+export const chatGptVoiceEvents = (prepared: PreparedConnection, callId: string, after: number) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "GET",
+    timeoutMs: 40_000,
+    path: (urls) => urls.chatgptEvents({ params: { callId }, query: { after } }),
+    run: ({ client, headers }) =>
+      client.chatgptEvents({ headers, params: { callId }, query: { after } }),
+  });
+
+export const chatGptVoiceContext = (
+  prepared: PreparedConnection,
+  callId: string,
+  payload: ChatGptVoiceContextRequest,
+) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    path: (urls) => urls.chatgptContext({ params: { callId } }),
+    run: ({ client, headers }) => client.chatgptContext({ headers, params: { callId }, payload }),
+  });
+
+export const endChatGptVoiceCall = (prepared: PreparedConnection, callId: string) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    path: (urls) => urls.chatgptEnd({ params: { callId } }),
+    run: ({ client, headers }) => client.chatgptEnd({ headers, params: { callId } }),
   });
