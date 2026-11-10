@@ -1,11 +1,15 @@
 // While a call is muted the voice model hears nothing, so "unmute" has to be caught here. T3
-// Code's on-device transcription does it when a streaming model is installed; Chrome's speech
-// recognition is the fallback. Either listens to a copy of the call's microphone.
+// Code's on-device transcription does it when a streaming model is installed (the tiny one is
+// fetched on first use); Chrome's speech recognition is the fallback outside the desktop app.
+// Either listens to a copy of the call's microphone.
 
 import {
+  downloadEnvironmentSpeechModel,
+  getEnvironmentSpeechModels,
   getEnvironmentSpeechStatus,
   getEnvironmentSpeechStreamUrl,
   openSpeechStream,
+  selectEnvironmentSpeechModel,
 } from "@t3tools/client-runtime/voice-input";
 import { DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS } from "@t3tools/contracts";
 
@@ -17,7 +21,8 @@ type PreparedConnection = NonNullable<ReturnType<typeof readPreparedConnection>>
 
 // The server caps one transcription stream at five minutes of audio.
 const SESSION_ROTATE_MS = 4 * 60_000;
-const SESSION_OVERLAP_MS = 3000;
+// Small and streaming, so voice unmute works without a full dictation model installed.
+const UNMUTE_MODEL_ID = "handy-computer/moonshine-streaming-tiny-gguf";
 
 const words = (text: string) =>
   text
@@ -28,8 +33,12 @@ const words = (text: string) =>
 
 /** "Mute", "mute yourself", "go on mute"; not a sentence that merely contains the word. */
 export function isMuteCommand(text: string) {
-  return /^(please |ok(ay)? |hey )?(mute|go (on )?mute|mute (yourself|myself|me|the mic|the microphone|now|please)|stop listening)( please| now)?$/.test(
-    words(text),
+  const said = words(text)
+    .split(" ")
+    .filter((word, index, all) => word !== all[index - 1])
+    .join(" ");
+  return /^(please |ok(ay)? |hey |t3 )*(can you |could you |would you )?(mute|go (on )?mute|mute (yourself|myself|me|it|the mic|the microphone|now|please)|stop listening)( please| now| thanks)?$/.test(
+    said,
   );
 }
 
@@ -94,13 +103,6 @@ async function localTranscription(
   onUnmute: () => void,
   onFailed: () => void,
 ): Promise<UnmuteListener | null> {
-  const status = await runEnvironmentSpeech(getEnvironmentSpeechStatus(prepared)).catch(() => null);
-  if (
-    !status?.supported ||
-    status.state === "missing-model" ||
-    !(status.supportsStreaming || status.supportsBufferedStreaming)
-  )
-    return null;
   const source = microphone.getAudioTracks()[0];
   if (!source) return null;
   // A copy stays live while the call's own track is disabled for muting.
@@ -156,14 +158,18 @@ async function localTranscription(
     sessions.at(-1)?.feed(event.data);
   };
   const rotation = setInterval(() => {
+    // The server runs one stream at a time, so the old one has to end before the new one starts.
     const previous = sessions.at(-1);
-    void open().then(() =>
-      setTimeout(() => {
-        previous?.cancel();
-        const index = previous ? sessions.indexOf(previous) : -1;
-        if (index >= 0) sessions.splice(index, 1);
-      }, SESSION_OVERLAP_MS),
-    );
+    if (previous) {
+      const index = sessions.indexOf(previous);
+      if (index >= 0) sessions.splice(index, 1);
+      previous.cancel();
+    }
+    void open().catch(() => {
+      if (stopped) return;
+      stop();
+      onFailed();
+    });
   }, SESSION_ROTATE_MS);
   try {
     await open();
@@ -175,6 +181,28 @@ async function localTranscription(
 }
 
 /**
+ * Makes sure the environment can transcribe a word on-device. Nothing installed is provisioned
+ * with the small streaming model; an installed model is never swapped for a worse one.
+ */
+async function streamingModelReady(prepared: PreparedConnection): Promise<boolean> {
+  const status = await runEnvironmentSpeech(getEnvironmentSpeechStatus(prepared)).catch(() => null);
+  if (!status?.supported) return false;
+  if (status.state !== "missing-model") return status.supportsStreaming;
+  const catalog = await runEnvironmentSpeech(getEnvironmentSpeechModels(prepared)).catch(
+    () => null,
+  );
+  const tiny = catalog?.models.find((model) => model.id === UNMUTE_MODEL_ID);
+  if (!tiny?.supportsStreaming) return false;
+  if (tiny.state !== "installed")
+    await runEnvironmentSpeech(downloadEnvironmentSpeechModel(prepared, UNMUTE_MODEL_ID));
+  await runEnvironmentSpeech(selectEnvironmentSpeechModel(prepared, UNMUTE_MODEL_ID));
+  return true;
+}
+
+// Chrome's speech recognition needs Google's speech service, which Electron builds don't carry.
+const isElectron = () => /\bElectron\//.test(navigator.userAgent);
+
+/**
  * Listens for "unmute" until heard or stopped. Resolves to null when nothing here can listen,
  * and calls `onFailed` if listening stops working later.
  */
@@ -184,15 +212,23 @@ export async function listenForUnmute(input: {
   onUnmute: () => void;
   onFailed: () => void;
 }): Promise<{ listener: UnmuteListener; via: "on-device" | "browser" } | null> {
-  if (input.microphone) {
-    const local = await localTranscription(
-      input.prepared,
-      input.microphone,
-      input.onUnmute,
-      input.onFailed,
-    ).catch(() => null);
-    if (local) return { listener: local, via: "on-device" };
+  // In Electron the on-device model is the only listener that can work, so it comes first.
+  const electron = isElectron();
+  const microphone = input.microphone;
+  const listenLocally = async () => {
+    try {
+      if (!microphone || !(await streamingModelReady(input.prepared))) return null;
+      return await localTranscription(input.prepared, microphone, input.onUnmute, input.onFailed);
+    } catch {
+      return null;
+    }
+  };
+  if (electron) {
+    const local = await listenLocally();
+    return local ? { listener: local, via: "on-device" } : null;
   }
   const browser = browserRecognition(input.onUnmute, input.onFailed);
-  return browser ? { listener: browser, via: "browser" } : null;
+  if (browser) return { listener: browser, via: "browser" };
+  const local = await listenLocally();
+  return local ? { listener: local, via: "on-device" } : null;
 }

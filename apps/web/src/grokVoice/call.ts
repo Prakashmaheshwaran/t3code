@@ -141,6 +141,7 @@ function setCallMuted(muted: boolean, byVoice = false) {
     if (byVoice) addLine({ who: "note", text: "Unmuted." });
     return;
   }
+  addLine({ who: "note", text: "Muted. Click the mic to unmute." });
   void listenForUnmute({
     prepared: call.prepared,
     microphone: call.call.microphone,
@@ -153,12 +154,12 @@ function setCallMuted(muted: boolean, byVoice = false) {
       return;
     }
     call.unmute = listening?.listener;
-    addLine({
-      who: "note",
-      text: listening
-        ? `Muted. Say "unmute" to come back${listening.via === "browser" ? " (heard through Chrome's speech recognition)" : ""}.`
-        : "Muted. Voice unmute isn't available here, so click the mic to unmute.",
-    });
+    if (listening)
+      addLine({
+        who: "note",
+        text: `Say "unmute" to come back${listening.via === "browser" ? " (heard through Chrome's speech recognition)" : ""}.`,
+      });
+    else addLine({ who: "note", text: "Voice unmute isn't available here." });
   });
 }
 
@@ -429,6 +430,9 @@ async function startGrokVoiceCall() {
         case "speaking":
           return set({ speaking: event.who });
         case "transcript":
+          // GPT-Live only reports user turns in this stream, so a spoken command is caught here
+          // as well as on the call's own data channel.
+          if (event.role === "user") heardCommand(event.text);
           return addLine({ who: event.role === "user" ? "you" : "grok", text: event.text });
         case "delegating":
           return set((state) => ({ delegating: state.delegating + 1 }));

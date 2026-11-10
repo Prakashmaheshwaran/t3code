@@ -24,7 +24,7 @@ export interface ChatGptCallCallbacks {
   readonly onStatus: (status: "live" | "closed", detail?: string) => void;
   readonly onEvent: (event: ChatGptVoiceEvent) => void;
   readonly onLevel: (level: number) => void;
-  /** Each finished user utterance, as GPT-Live heard it. */
+  /** The user's words so far, as GPT-Live hears them; called again as each piece arrives. */
   readonly onUtterance?: (text: string) => void;
 }
 
@@ -209,16 +209,22 @@ export class ChatGptCall {
       this.callbacks.onEvent({ type: "speaking", who });
     if (event.type === "delegation.created" && event.item?.id) this.lastDelegation = event.item.id;
     else if (event.type === "input_transcript.added") {
-      this.utterance += event.item?.text ?? "";
+      // GPT-Live never closes a user turn with turn.done, so the words are checked as they land.
+      this.utterance = (this.utterance + (event.item?.text ?? "")).slice(-240);
       speaking("user");
-    } else if (event.type === "output_transcript.added") speaking("assistant");
+      if (this.utterance.trim()) this.callbacks.onUtterance?.(this.utterance.trim());
+    } else if (event.type === "output_transcript.added") {
+      this.utterance = "";
+      speaking("assistant");
+    } else if (event.type === "turn.created" && event.turn?.role === "assistant")
+      this.utterance = "";
     else if (event.type === "turn.done" || event.type === "output_audio_buffer.cleared") {
       speaking(null);
       if (event.turn?.role === "user") {
         const said = (event.turn.transcript ?? this.utterance).trim();
-        this.utterance = "";
         if (said) this.callbacks.onUtterance?.(said);
       }
+      this.utterance = "";
     } else if (event.type === "error" && import.meta.env.DEV)
       console.warn("[chatgpt-voice] Live rejected an event", event.error?.message);
   }
