@@ -209,10 +209,10 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
         }),
       )
       .handle(
-        "grokRespond",
-        Effect.fn("environment.voice.grokRespond")(function* (args) {
+        "grokDelegate",
+        Effect.fn("environment.voice.grokDelegate")(function* (args) {
           yield* guard(args.endpoint.name);
-          return yield* grok.respond(args.payload);
+          return yield* grok.delegate(args.payload);
         }),
       );
   }),

@@ -6,7 +6,7 @@ import { CloudSpeechError, SPEECH_STREAM_PATH } from "@t3tools/contracts";
 import type {
   CloudSpeechModelId,
   CloudSpeechProvider,
-  GrokVoiceRespondRequest,
+  GrokVoiceDelegateRequest,
   SettingsSecretValue,
   SpeechAcceleration,
   SpeechModelUnloadTimeout,
@@ -311,12 +311,16 @@ export const createGrokVoiceSession = (prepared: PreparedConnection) =>
     run: ({ client, headers }) => client.grokSession({ headers }),
   });
 
-export const grokVoiceRespond = (prepared: PreparedConnection, payload: GrokVoiceRespondRequest) =>
+export const grokVoiceDelegate = (
+  prepared: PreparedConnection,
+  payload: GrokVoiceDelegateRequest,
+) =>
   request({
     group: "voice",
     prepared,
     method: "POST",
-    timeoutMs: 70_000,
-    path: (urls) => urls.grokRespond(),
-    run: ({ client, headers }) => client.grokRespond({ headers, payload }),
+    // A delegation may wait on a thread for up to 90 seconds.
+    timeoutMs: 150_000,
+    path: (urls) => urls.grokDelegate(),
+    run: ({ client, headers }) => client.grokDelegate({ headers, payload }),
   });

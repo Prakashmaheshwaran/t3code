@@ -10,9 +10,9 @@ import * as HttpServerRespondable from "effect/http/HttpServerRespondable";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
 import {
+  GrokVoiceDelegateRequest,
+  GrokVoiceDelegateResult,
   GrokVoiceError,
-  GrokVoiceRespondRequest,
-  GrokVoiceRespondResult,
   GrokVoiceSession,
 } from "./grokVoice.ts";
 import {
@@ -936,10 +936,10 @@ export class EnvironmentVoiceHttpApi extends HttpApiGroup.make("voice")
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
-    HttpApiEndpoint.post("grokRespond", "/api/voice/grok/respond", {
+    HttpApiEndpoint.post("grokDelegate", "/api/voice/grok/delegate", {
       headers: OptionalBearerHeaders,
-      payload: GrokVoiceRespondRequest,
-      success: GrokVoiceRespondResult,
+      payload: GrokVoiceDelegateRequest,
+      success: GrokVoiceDelegateResult,
       error: [...EnvironmentScopedOperationErrors, GrokVoiceError],
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}

@@ -71,6 +71,8 @@ export interface McpToolSession {
     tool: string,
     args: Readonly<Record<string, unknown>>,
   ) => Effect.Effect<unknown, AcpMcpBridgeError>;
+  /** Resolves to the JSON-RPC `result` of `tools/list`. */
+  readonly list: Effect.Effect<unknown, AcpMcpBridgeError>;
 }
 
 /**
@@ -159,6 +161,7 @@ export const mcpToolSession = (
         request("tools/call", { name: tool, arguments: args }).pipe(
           Effect.map((envelope) => envelope.result),
         ),
+      list: request("tools/list", {}).pipe(Effect.map((envelope) => envelope.result)),
     } satisfies McpToolSession;
   });
 };

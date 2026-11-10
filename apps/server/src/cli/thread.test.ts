@@ -78,6 +78,7 @@ it.effect(
       });
       using _session = vi.spyOn(McpBridge, "mcpToolSession").mockReturnValue(
         Effect.succeed({
+          list: Effect.die("not used"),
           call: (tool, args) => {
             switch (tool) {
               case "t3_project_list":

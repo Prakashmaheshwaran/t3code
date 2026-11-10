@@ -8,19 +8,40 @@ export const GrokVoiceSession = Schema.Struct({
 });
 export type GrokVoiceSession = typeof GrokVoiceSession.Type;
 
-/** One stateless delegator round, forwarded to xAI's Responses API with the server's Grok login. */
-export const GrokVoiceRespondRequest = Schema.Struct({
-  model: Schema.optionalKey(Schema.String),
-  instructions: Schema.String,
-  input: Schema.Array(Schema.Unknown),
-  tools: Schema.Array(Schema.Unknown),
+/** One voice request for the stateless delegator, which acts through this server's MCP tools. */
+export const GrokVoiceDelegateRequest = Schema.Struct({
+  /** What the voice agent heard the user ask. */
+  request: Schema.String,
+  /** Both sides of the call since the previous delegation, as `User: …` / `Voice agent: …` lines. */
+  transcript: Schema.Array(Schema.String),
+  viewed: Schema.optionalKey(
+    Schema.Struct({
+      threadId: Schema.String,
+      title: Schema.optionalKey(Schema.String),
+      projectId: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  /** Threads that already got the full voice-delegation header in this call. */
+  explained: Schema.Array(Schema.String),
 });
-export type GrokVoiceRespondRequest = typeof GrokVoiceRespondRequest.Type;
+export type GrokVoiceDelegateRequest = typeof GrokVoiceDelegateRequest.Type;
 
-export const GrokVoiceRespondResult = Schema.Struct({
-  output: Schema.Array(Schema.Unknown),
+export const GrokVoiceSentPrompt = Schema.Struct({
+  threadId: Schema.String,
+  title: Schema.String,
+  instruction: Schema.String,
 });
-export type GrokVoiceRespondResult = typeof GrokVoiceRespondResult.Type;
+export type GrokVoiceSentPrompt = typeof GrokVoiceSentPrompt.Type;
+
+export const GrokVoiceDelegateResult = Schema.Struct({
+  speech: Schema.String,
+  /** A thread the client should show; MCP cannot move the user's screen. */
+  open: Schema.optionalKey(Schema.String),
+  /** Work admitted this request, for announcing replies when they land. */
+  sent: Schema.Array(GrokVoiceSentPrompt),
+  explained: Schema.Array(Schema.String),
+});
+export type GrokVoiceDelegateResult = typeof GrokVoiceDelegateResult.Type;
 
 export class GrokVoiceError extends Schema.TaggedError<GrokVoiceError>()(
   "GrokVoiceError",

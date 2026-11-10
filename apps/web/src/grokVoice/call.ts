@@ -1,6 +1,6 @@
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { createGrokVoiceSession } from "@t3tools/client-runtime/voice-input";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { createGrokVoiceSession, grokVoiceDelegate } from "@t3tools/client-runtime/voice-input";
+import type { EnvironmentId, GrokVoiceSentPrompt, ScopedThreadRef } from "@t3tools/contracts";
 import type { AnyRouter } from "@tanstack/react-router";
 import { create } from "zustand";
 
@@ -10,14 +10,15 @@ import { readThreadShell } from "../state/entities";
 import { readPreparedConnection } from "../state/session";
 import { liveShellEnvironmentIdsAtom } from "../state/shell";
 import { environmentThreadShells } from "../state/threads";
-import { liveInstructions, liveTools, runDelegation } from "./delegator";
-import { createBrowserHost, describeThread, lastAgentReply, readViewedThreadRef } from "./host";
+import { lastAgentReply, openThread, readViewedThreadRef, threadStatus } from "./host";
+import { liveInstructions, liveTools } from "./voiceAgent";
 import { GrokRealtimeCall } from "./realtime";
 
 export const GROK_VOICES = ["Ara", "Eve", "Leo", "Rex", "Sal"] as const;
 const VOICE_KEY = "t3code:grok-voice:voice";
 const MAX_LINES = 40;
-const ANNOUNCE_CHARS = 1200;
+const ANNOUNCE_CHARS = 800;
+const MAX_DELTA_LINES = 20;
 
 export interface CallLine {
   readonly who: "you" | "grok" | "note";
@@ -59,7 +60,11 @@ const addLine = (line: CallLine) =>
   set((state) => ({ lines: [...state.lines, line].slice(-MAX_LINES) }));
 
 let router: AnyRouter | null = null;
-let active: { call: GrokRealtimeCall; dispose: () => void } | null = null;
+let active: {
+  call: GrokRealtimeCall;
+  dispose: () => void;
+  heardUser: (text: string) => void;
+} | null = null;
 
 export function installGrokVoice(appRouter: AnyRouter) {
   router = appRouter;
@@ -81,7 +86,7 @@ export function toggleGrokVoiceMute() {
 export function sendGrokVoiceText(text: string) {
   const trimmed = text.trim();
   if (!trimmed || !active) return;
-  addLine({ who: "you", text: trimmed });
+  active.heardUser(trimmed);
   active.call.say(trimmed);
 }
 
@@ -105,11 +110,18 @@ function pickEnvironment(): EnvironmentId | null {
 
 interface Watched {
   readonly ref: ScopedThreadRef;
+  readonly prompt: GrokVoiceSentPrompt;
   readonly baselineRunId: string | null;
   announced: string | null;
 }
 
-/** Announces delegated threads' outcomes: the reason a stateless delegator can answer "started". */
+const isRequestStatus = (status: string) =>
+  status === "approval" || status === "input" || status === "request";
+
+/**
+ * Pushes delegated threads' outcomes into the call, as OpenCode's reply watch does: the reason a
+ * stateless delegator can answer "started" and let the result arrive on its own.
+ */
 function watchThreads(onNews: (note: string, detail: string) => void) {
   const watched = new Map<string, Watched>();
   const check = () => {
@@ -118,14 +130,19 @@ function watchThreads(onNews: (note: string, detail: string) => void) {
       if (!shell) continue;
       const run = shell.latestRun;
       if (!run) continue;
-      const { title, status } = describeThread(shell);
+      const title = shell.title || entry.prompt.title || "a thread";
+      const request = JSON.stringify(entry.prompt.instruction.slice(0, 100));
+      const status = threadStatus(shell);
       // Approvals and questions arrive mid-run, so they are checked before the run is.
-      if (status === "approval" || status === "input" || status === "request") {
+      if (isRequestStatus(status)) {
         const marker = `${run.runId}:${status}`;
         if (entry.announced === marker) continue;
         entry.announced = marker;
         const need = status === "approval" ? "an approval" : "an answer";
-        onNews(`${title} is waiting for ${need}.`, `Thread "${title}" is waiting for ${need}.`);
+        onNews(
+          `${title} is waiting for ${need}.`,
+          `Thread ${JSON.stringify(title)}, request ${request}, is waiting for ${need} from the user.`,
+        );
         continue;
       }
       // Cleared once answered, so a second request in the same run is announced too.
@@ -135,10 +152,10 @@ function watchThreads(onNews: (note: string, detail: string) => void) {
       watched.delete(key);
       const outcome = run.status === "completed" ? "finished" : `ended (${run.status})`;
       void lastAgentReply(entry.ref).then((text) => {
-        const reply = text.slice(0, ANNOUNCE_CHARS);
+        const reply = text.replace(/```[\s\S]*?```/g, "[code in thread]").slice(0, ANNOUNCE_CHARS);
         onNews(
           `${title} ${outcome}.`,
-          `Thread "${title}" ${outcome}.${reply ? ` Its final reply: ${reply}` : ""}`,
+          `Result from thread ${JSON.stringify(title)}, request ${request} (${outcome}): ${reply || "no reply text."}`,
         );
       });
     }
@@ -148,18 +165,18 @@ function watchThreads(onNews: (note: string, detail: string) => void) {
     check,
   );
   return {
-    watch: (ref: ScopedThreadRef) => {
+    watch: (ref: ScopedThreadRef, prompt: GrokVoiceSentPrompt) => {
       const key = scopedThreadKey(ref);
-      if (watched.has(key)) return;
       const shell = readThreadShell(ref);
-      const status = shell ? describeThread(shell).status : null;
+      const status = shell ? threadStatus(shell) : null;
       watched.set(key, {
         ref,
-        // A run already finished before this request is old news; one still running is not.
+        prompt,
+        // A run that already finished, even one the delegator waited on and reported, is old news.
         baselineRunId: shell?.runtime?.activeRunId ? null : (shell?.latestRun?.runId ?? null),
         // The delegator already knows about a request pending when it started watching.
         announced:
-          shell?.latestRun && (status === "approval" || status === "input" || status === "request")
+          shell?.latestRun && status && isRequestStatus(status)
             ? `${shell.latestRun.runId}:${status}`
             : null,
       });
@@ -187,19 +204,44 @@ async function startGrokVoiceCall() {
   }
 
   let ended = false;
+  // News waits until nobody is talking and no delegation is running, as OpenCode's reply gate does.
+  const news: string[] = [];
+  const flushNews = () => {
+    const state = useGrokVoiceStore.getState();
+    if (ended || state.speaking === "user" || state.delegating > 0) return;
+    for (const detail of news.splice(0)) call.announce(detail);
+  };
+  const unsubscribeGate = useGrokVoiceStore.subscribe(flushNews);
   const watcher = watchThreads((note, detail) => {
     if (ended) return;
     addLine({ who: "note", text: note });
-    call.announce(detail);
+    news.push(detail);
+    flushNews();
   });
-  const host = createBrowserHost({ router: appRouter, environmentId, watch: watcher.watch });
-  const transcript = () =>
-    useGrokVoiceStore
-      .getState()
-      .lines.filter((line) => line.who !== "note")
-      .slice(-12)
-      .map((line) => `${line.who === "you" ? "User" : "Voice agent"}: ${line.text}`)
-      .join("\n");
+
+  // Both sides of the call; each delegation gets the lines since the previous one.
+  const log: string[] = [];
+  const heardUser = (text: string) => {
+    log.push(`User: ${text}`);
+    addLine({ who: "you", text });
+  };
+  let delegatedUpTo = 0;
+  let explained: string[] = [];
+  const takeDelta = () => {
+    const delta = log.slice(Math.max(delegatedUpTo, log.length - MAX_DELTA_LINES));
+    delegatedUpTo = log.length;
+    return delta;
+  };
+  const viewed = () => {
+    const ref = readViewedThreadRef(appRouter);
+    if (!ref || ref.environmentId !== environmentId) return undefined;
+    const shell = readThreadShell(ref);
+    return {
+      threadId: ref.threadId,
+      ...(shell?.title ? { title: shell.title } : {}),
+      ...(shell?.projectId ? { projectId: shell.projectId } : {}),
+    };
+  };
 
   const call: GrokRealtimeCall = new GrokRealtimeCall({
     onStatus: (status, detail) => {
@@ -209,8 +251,11 @@ async function startGrokVoiceCall() {
         if (detail) set({ error: detail });
       }
     },
-    onUserTranscript: (text) => addLine({ who: "you", text }),
-    onAssistantTranscript: (text) => addLine({ who: "grok", text }),
+    onUserTranscript: (text) => heardUser(text),
+    onAssistantTranscript: (text) => {
+      log.push(`Voice agent: ${text}`);
+      addLine({ who: "grok", text });
+    },
     onSpeaking: (speaking) => set({ speaking }),
     onNote: (text) => addLine({ who: "note", text }),
     onLevel: (level) => {
@@ -232,13 +277,29 @@ async function startGrokVoiceCall() {
           ? (args as { request: string }).request
           : "";
       set((state) => ({ delegating: state.delegating + 1 }));
-      runDelegation({ host, request, transcript: transcript() })
+      const current = viewed();
+      runEnvironmentSpeech(
+        grokVoiceDelegate(prepared, {
+          request,
+          transcript: takeDelta(),
+          ...(current ? { viewed: current } : {}),
+          explained,
+        }),
+      )
         .then(
-          (speech) => {
-            if (!ended) call.sendToolOutput(callId, { speech });
+          (result) => {
+            explained = [...result.explained];
+            for (const prompt of result.sent)
+              watcher.watch(scopeThreadRef(environmentId, prompt.threadId as never), prompt);
+            if (result.open)
+              void openThread(appRouter, environmentId, result.open).then((opened) => {
+                if (!opened) addLine({ who: "note", text: "That thread didn't show up to open." });
+              });
+            if (import.meta.env.DEV) console.info("[grok-voice] delegation", result);
+            if (!ended) call.sendToolOutput(callId, { speech: result.speech });
           },
           (error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
+            const message = errorMessage(error);
             addLine({ who: "note", text: `Delegation failed: ${message}` });
             if (!ended) call.sendToolOutput(callId, { error: message });
           },
@@ -250,12 +311,13 @@ async function startGrokVoiceCall() {
   const dispose = () => {
     if (ended) return;
     ended = true;
+    unsubscribeGate();
     watcher.dispose();
     call.stop();
     active = null;
     set({ status: "idle", speaking: null, delegating: 0, level: 0 });
   };
-  active = { call, dispose };
+  active = { call, dispose, heardUser };
 
   try {
     const session = await runEnvironmentSpeech(createGrokVoiceSession(prepared));

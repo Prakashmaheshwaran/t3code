@@ -136,6 +136,7 @@ import { useDictationShortcut } from "../../speech/useDictationShortcut";
 import { useDictationSubmissionShortcut } from "../../speech/useDictationSubmissionShortcut";
 import { useEnvironmentSpeechInput } from "../../speech/useEnvironmentSpeechInput";
 import { ComposerSpeechButton, ComposerSpeechRecordingPill } from "./ComposerSpeechButton";
+import { GrokVoiceCallButton } from "../../grokVoice/GrokVoiceCallButton";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { shortcutLabelForCommand } from "../../keybindings";
 import {
@@ -3613,6 +3614,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     keepFullHistory={props.keepFullHistory}
                     onToggleKeepFullHistory={props.onToggleKeepFullHistory}
                   >
+                    <GrokVoiceCallButton
+                      shortcutLabel={shortcutLabelForCommand(keybindings, "voice.call")}
+                    />
                     {speechInput.available ? (
                       <>
                         <ComposerSpeechRecordingPill

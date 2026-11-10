@@ -16,7 +16,7 @@ export {
   getEnvironmentSpeechModels,
   getCloudSpeechKeys,
   createGrokVoiceSession,
-  grokVoiceRespond,
+  grokVoiceDelegate,
   getCloudSpeechModels,
   requireCloudSpeechKey,
   setCloudSpeechKey,
