@@ -57,6 +57,7 @@ export class ChatGptCall {
   private callId: string | undefined;
   private stopped = false;
   private utterance = "";
+  private utteranceAt = 0;
   private lastDelegation: string | undefined;
   private sentEvents = 0;
   private muted = false;
@@ -210,6 +211,10 @@ export class ChatGptCall {
     if (event.type === "delegation.created" && event.item?.id) this.lastDelegation = event.item.id;
     else if (event.type === "input_transcript.added") {
       // GPT-Live never closes a user turn with turn.done, so the words are checked as they land.
+      // A pause longer than a word gap starts a new utterance.
+      const now = Date.now();
+      if (now - this.utteranceAt > 1000) this.utterance = "";
+      this.utteranceAt = now;
       this.utterance = (this.utterance + (event.item?.text ?? "")).slice(-240);
       speaking("user");
       if (this.utterance.trim()) this.callbacks.onUtterance?.(this.utterance.trim());
