@@ -1,3 +1,4 @@
+import { deriveRunSpeeds } from "./chat/runSpeed";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -525,6 +526,7 @@ export default function ChatView(props: ChatViewProps) {
     serverProjection,
     activeProviderThread,
   );
+  const runSpeeds = serverProjection ? deriveRunSpeeds(serverProjection) : undefined;
   const serverVisibleTurnItems = useQuietThreadVisibleTurnItems(routeThreadDetailRef);
   const serverThreadHistory = useThreadHistory(routeThreadDetailRef);
   const threadHistoryControls = (() => {
@@ -3412,6 +3414,7 @@ export default function ChatView(props: ChatViewProps) {
                   footer={timelineFooter}
                   listRef={legendListRef}
                   runs={serverProjection?.runs ?? []}
+                  {...(runSpeeds ? { runSpeeds } : {})}
                   latestRun={activeActivityRun}
                   announcedRun={announcedRun(activeActivityRun, serverProjection?.runs ?? [])}
                   detailBehindShell={isDetailBehindShell(

@@ -18,6 +18,7 @@ import { AssistantCitationSource } from "./AssistantCitationSource";
 import { resolveAssistantMessageCopyState } from "./MessagesTimeline.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
+import { formatTokensPerSecond, formatTtft } from "./runSpeed";
 import { useUiStateStore } from "~/uiStateStore";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
@@ -188,6 +189,7 @@ function AssistantMessageMeta({
       {projectedItem?.item.type === "assistant_message" ? (
         <AssistantForkButton projectedItem={projectedItem} />
       ) : null}
+      {!message.streaming && message.runId ? <RunSpeedMeta runId={message.runId} /> : null}
       {!message.streaming && (
         <Tooltip>
           <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
@@ -199,6 +201,28 @@ function AssistantMessageMeta({
         </Tooltip>
       )}
     </div>
+  );
+}
+
+function RunSpeedMeta({ runId }: { runId: RunId }) {
+  const ctx = use(TimelineRowCtx);
+  const speed = ctx.runSpeeds.get(runId);
+  if (!speed) return null;
+  const parts = [`TTFT ${formatTtft(speed.ttftMs)}`];
+  if (speed.tokensPerSecond !== null) parts.push(formatTokensPerSecond(speed.tokensPerSecond));
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
+        {parts.join(" · ")}
+      </TooltipTrigger>
+      <TooltipPopup>
+        Time to first token: {formatTtft(speed.ttftMs)}, from the provider getting the request to
+        its first output.
+        {speed.outputTokens !== null && speed.tokensPerSecond !== null
+          ? ` ${speed.outputTokens.toLocaleString()} output tokens, averaged from the first output to the end of the turn, tool time included.`
+          : ""}
+      </TooltipPopup>
+    </Tooltip>
   );
 }
 
