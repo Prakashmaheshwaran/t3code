@@ -218,6 +218,13 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "chatgptModels",
+        Effect.fn("environment.voice.chatgptModels")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* chatgpt.models;
+        }),
+      )
+      .handle(
         "chatgptStart",
         Effect.fn("environment.voice.chatgptStart")(function* (args) {
           yield* guard(args.endpoint.name);

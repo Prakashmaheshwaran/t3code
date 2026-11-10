@@ -18,6 +18,7 @@ export {
   createGrokVoiceSession,
   grokVoiceDelegate,
   startChatGptVoiceCall,
+  chatGptVoiceModels,
   chatGptVoiceEvents,
   chatGptVoiceContext,
   endChatGptVoiceCall,

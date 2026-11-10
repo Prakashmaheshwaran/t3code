@@ -28,6 +28,7 @@ const APPROVAL_TOOLS = [
   {
     type: "function",
     name: "pending_approvals",
+    strict: false,
     description:
       'Permission requests a thread is waiting on, oldest first. For what one asks, read the thread with view "activity".',
     parameters: {
@@ -40,6 +41,7 @@ const APPROVAL_TOOLS = [
   {
     type: "function",
     name: "answer_approval",
+    strict: false,
     description:
       "Approve or decline a thread's permission request for the user. Only after the user clearly decided. Omit requestId for the oldest.",
     parameters: {
@@ -58,6 +60,7 @@ const APPROVAL_TOOLS = [
 const OPEN_THREAD_TOOL = {
   type: "function",
   name: "open_thread",
+  strict: false,
   description:
     "Show a thread on the user's screen. Only when they asked to see, open, switch to, or go to it.",
   parameters: {
@@ -95,13 +98,14 @@ You manage threads; you never write code yourself. Coding work happens by sendin
 - To start new work, call t3_thread_launch with the task as message, a short title, and the right projectId (the viewed thread's project unless they name another; find others with t3_project_list). Without a project, pass scratch: true. Leave the model and modes out unless the user named them.
 - For "a separate", "parallel", "isolated", or "another branch" session, launch with workspaceStrategy {"type": "worktree"} from the project's default branch; if the project isn't a git repository, say so and launch in the project instead.
 - To switch what the user sees, call open_thread, and only when their words ask to see, open, show, switch, or go to a thread. Starting, messaging, reading, or checking a thread never opens it: the user's view stays put and the reply is announced.
+- Thread lists default to the viewed thread's project. For threads in a project the user names, first find its projectId with t3_project_list, then pass it; for every project, pass allProjects. Never report one project's threads as another's.
 - To find a thread by name, use t3_thread_search (it forgives word order and mishearings). Use the exact thread IDs returned by tools.
 - Thread lists don't show branches: to pick a thread by its branch or worktree, use t3_worktree_list. When several threads match equally, ask which one instead of guessing.
 - Messages steer by default (t3_thread_send mode "steer"). Queue one ("queue") when the user says to do it after the current work ("when it's done, also...").
 - To start work in an existing thread, send to it, then answer right away that it started; the app announces the thread's reply when it lands. Only call t3_thread_wait when the user asked for the result now or it's a quick lookup.
 - For any status or "did it respond?" question, always read the thread (t3_thread_read with view "messages" and a small limit) or list threads in this turn rather than assuming.
 - To change a thread's model or effort ("use Opus", "switch to high"), find the model with orchestrator_capabilities, then t3_thread_configure. Switch only when asked; if several models fit, ask which.
-- Permission requests a thread is waiting on: pending_approvals, then answer_approval once the user clearly decided ("approve", "allow for this session", "deny"). If they ask what it wants, read the thread with view "activity" and describe it in plain words. Questions a thread asks the user go through t3_pending_request.
+- "What is it waiting for?" or "does it need anything?": call pending_approvals first. Permission requests a thread is waiting on: pending_approvals, then answer_approval once the user clearly decided ("approve", "allow for this session", "deny"). If they ask what it wants, read the thread with view "activity" and describe it in plain words. Questions a thread asks the user go through t3_pending_request.
 - To close a thread, archive it with t3_thread_organize. Rename with t3_thread_update.
 - What a thread already wrote, you read; never ask it to restate it.
 - Write messages to threads as clear instructions that keep the user's exact intent, audience, and destination. The app attaches the user's own words and the voice transcript to every message, so don't paste the transcript in.
@@ -149,6 +153,7 @@ type OutputItem = {
 const MAX_ROUNDS = 10;
 const MAX_TOOL_OUTPUT = 6_000;
 const MAX_WAIT_MS = 90_000;
+const MAX_READS_PER_THREAD = 2;
 
 /** Drops the linked-environment selector: a voice call acts on the environment it runs in. */
 export function toFunctionTools(tools: ReadonlyArray<McpTool>) {
@@ -169,6 +174,8 @@ export function toFunctionTools(tools: ReadonlyArray<McpTool>) {
       return {
         type: "function",
         name: tool.name,
+        // OpenAI's Responses API defaults to strict, which makes every optional filter required.
+        strict: false,
         description: tool.description ?? "",
         parameters: { ...schema, properties, ...(required ? { required } : {}) },
       };
@@ -237,6 +244,7 @@ export async function runDelegation(
   const instruction = userInstruction(input.request, input.transcript);
   const explained = new Set(input.explained);
   const sent: { threadId: string; title: string; instruction: string }[] = [];
+  const readsByThread = new Map<string, number>();
   let open: string | undefined;
   let viewed = input.viewed;
 
@@ -316,12 +324,29 @@ export async function runDelegation(
       args.timeoutMs = Math.min(asked, MAX_WAIT_MS);
     }
     if (name === "t3_thread_read") {
+      // A spoken answer needs a glance, not the history; some models page forever if allowed.
+      const reads = (readsByThread.get(String(args.threadId)) ?? 0) + 1;
+      readsByThread.set(String(args.threadId), reads);
+      if (reads > MAX_READS_PER_THREAD)
+        return "Error: you already read this thread in this request. Answer with what you have.";
       args.view ??= "messages";
-      args.limit ??= 8;
-      args.maxCharsPerItem ??= 600;
+      args.limit = Math.min(typeof args.limit === "number" ? args.limit : 8, 10);
+      args.maxCharsPerItem = Math.min(
+        typeof args.maxCharsPerItem === "number" ? args.maxCharsPerItem : 600,
+        800,
+      );
     }
 
     const result = await deps.call(name, args);
+    if (process.env.T3_VOICE_TRACE === "1")
+      // @effect-diagnostics-next-line globalConsole:off
+      console.info(
+        "[voice-delegator]",
+        name,
+        JSON.stringify(args).slice(0, 400),
+        "→",
+        toolOutput(result).slice(0, 400),
+      );
     const failed = (result as { isError?: boolean } | undefined)?.isError === true;
     if (!failed && (name === "t3_thread_send" || name === "t3_thread_launch")) {
       const threadId = name === "t3_thread_send" ? target : findThreadId(result);

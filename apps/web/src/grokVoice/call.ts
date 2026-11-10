@@ -1,5 +1,9 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { createGrokVoiceSession, grokVoiceDelegate } from "@t3tools/client-runtime/voice-input";
+import {
+  chatGptVoiceModels,
+  createGrokVoiceSession,
+  grokVoiceDelegate,
+} from "@t3tools/client-runtime/voice-input";
 import {
   CHATGPT_VOICES,
   type ChatGptVoiceEvent,
@@ -30,6 +34,7 @@ export const VOICE_PROVIDERS: Record<VoiceProvider, { label: string; voices: rea
   };
 const VOICE_KEY = "t3code:grok-voice:voice";
 const PROVIDER_KEY = "t3code:grok-voice:provider";
+const DELEGATOR_MODEL_KEY = "t3code:grok-voice:chatgpt-delegator-model";
 const MAX_LINES = 40;
 const ANNOUNCE_CHARS = 800;
 const MAX_DELTA_LINES = 20;
@@ -51,6 +56,11 @@ interface GrokVoiceState {
   readonly voice: string;
   /** Grok calls take typed input too; ChatGPT calls are speech only. */
   readonly canType: boolean;
+  /** The Codex model ChatGPT calls' delegator thinks with; null follows the server default. */
+  readonly delegatorModel: string | null;
+  readonly chatgptModels: ReadonlyArray<{ id: string; name: string }> | null;
+  readonly chatgptDefaultModel: string | null;
+  readonly chatgptModelsError: string | null;
 }
 
 function readStored(key: string) {
@@ -88,6 +98,10 @@ export const useGrokVoiceStore = create<GrokVoiceState>()(() => ({
   provider: readProvider(),
   voice: readVoice(readProvider()),
   canType: false,
+  delegatorModel: readStored(DELEGATOR_MODEL_KEY),
+  chatgptModels: null,
+  chatgptDefaultModel: null,
+  chatgptModelsError: null,
 }));
 
 const set = useGrokVoiceStore.setState;
@@ -116,6 +130,32 @@ export function setGrokVoice(voice: string) {
   const { provider } = useGrokVoiceStore.getState();
   writeStored(provider === "grok" ? VOICE_KEY : `${VOICE_KEY}:${provider}`, voice);
   set({ voice });
+}
+
+export function setDelegatorModel(model: string | null) {
+  if (model) writeStored(DELEGATOR_MODEL_KEY, model);
+  else
+    try {
+      localStorage.removeItem(DELEGATOR_MODEL_KEY);
+    } catch {}
+  set({ delegatorModel: model });
+}
+
+/** Asks the environment which Codex models the signed-in ChatGPT plan offers. */
+export async function loadChatGptModels() {
+  const environmentId = pickEnvironment();
+  const prepared = environmentId ? readPreparedConnection(environmentId) : null;
+  if (!prepared) return set({ chatgptModelsError: "Connect to an environment first." });
+  try {
+    const result = await runEnvironmentSpeech(chatGptVoiceModels(prepared));
+    set({
+      chatgptModels: result.models,
+      chatgptDefaultModel: result.default,
+      chatgptModelsError: null,
+    });
+  } catch (error) {
+    set({ chatgptModelsError: errorMessage(error) });
+  }
 }
 
 export function setVoiceProvider(provider: VoiceProvider) {
@@ -159,7 +199,12 @@ interface Watched {
   readonly prompt: GrokVoiceSentPrompt;
   readonly baselineRunId: string | null;
   announced: string | null;
+  /** Until then, a pending request is the one the delegator just saw or answered. */
+  readonly settleAt: number;
 }
+
+// Long enough for an answered approval to clear from the thread before it could be re-announced.
+const WATCH_GRACE_MS = 2500;
 
 const isRequestStatus = (status: string) =>
   status === "approval" || status === "input" || status === "request";
@@ -181,6 +226,7 @@ function watchThreads(onNews: (note: string, detail: string) => void) {
       const status = threadStatus(shell);
       // Approvals and questions arrive mid-run, so they are checked before the run is.
       if (isRequestStatus(status)) {
+        if (Date.now() < entry.settleAt) continue;
         const marker = `${run.runId}:${status}`;
         if (entry.announced === marker) continue;
         entry.announced = marker;
@@ -212,20 +258,17 @@ function watchThreads(onNews: (note: string, detail: string) => void) {
   );
   return {
     watch: (ref: ScopedThreadRef, prompt: GrokVoiceSentPrompt) => {
-      const key = scopedThreadKey(ref);
       const shell = readThreadShell(ref);
-      const status = shell ? threadStatus(shell) : null;
-      watched.set(key, {
+      watched.set(scopedThreadKey(ref), {
         ref,
         prompt,
         // A run that already finished, even one the delegator waited on and reported, is old news.
         baselineRunId: shell?.runtime?.activeRunId ? null : (shell?.latestRun?.runId ?? null),
-        // The delegator already knows about a request pending when it started watching.
-        announced:
-          shell?.latestRun && status && isRequestStatus(status)
-            ? `${shell.latestRun.runId}:${status}`
-            : null,
+        announced: null,
+        settleAt: Date.now() + WATCH_GRACE_MS,
       });
+      // A request still pending after the grace period is a new one, or one nobody answered.
+      setTimeout(check, WATCH_GRACE_MS + 50);
     },
     dispose: unsubscribe,
   };
@@ -348,6 +391,7 @@ async function startGrokVoiceCall() {
       const current = viewed();
       await call.start({
         voice: useGrokVoiceStore.getState().voice as (typeof CHATGPT_VOICES)[number],
+        delegatorModel: useGrokVoiceStore.getState().delegatorModel ?? undefined,
         ...(current ? { viewed: current } : {}),
       });
     } catch (error) {

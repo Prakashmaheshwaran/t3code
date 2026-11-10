@@ -19,6 +19,7 @@ import {
   ChatGptVoiceContextRequest,
   ChatGptVoiceError,
   ChatGptVoiceEvents,
+  ChatGptVoiceModels,
   ChatGptVoiceStartRequest,
   ChatGptVoiceStartResult,
 } from "./chatgptVoice.ts";
@@ -948,6 +949,13 @@ export class EnvironmentVoiceHttpApi extends HttpApiGroup.make("voice")
       payload: GrokVoiceDelegateRequest,
       success: GrokVoiceDelegateResult,
       error: [...EnvironmentScopedOperationErrors, GrokVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("chatgptModels", "/api/voice/chatgpt/models", {
+      headers: OptionalBearerHeaders,
+      success: ChatGptVoiceModels,
+      error: [...EnvironmentScopedOperationErrors, ChatGptVoiceError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

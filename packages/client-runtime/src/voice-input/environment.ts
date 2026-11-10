@@ -371,3 +371,12 @@ export const endChatGptVoiceCall = (prepared: PreparedConnection, callId: string
     path: (urls) => urls.chatgptEnd({ params: { callId } }),
     run: ({ client, headers }) => client.chatgptEnd({ headers, params: { callId } }),
   });
+
+export const chatGptVoiceModels = (prepared: PreparedConnection) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "GET",
+    path: (urls) => urls.chatgptModels(),
+    run: ({ client, headers }) => client.chatgptModels({ headers }),
+  });

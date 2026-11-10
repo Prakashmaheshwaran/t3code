@@ -44,7 +44,11 @@ export class ChatGptCall {
     this.callbacks = callbacks;
   }
 
-  async start(input: { voice: ChatGptVoiceStartRequest["voice"]; viewed?: GrokVoiceViewed }) {
+  async start(input: {
+    voice: ChatGptVoiceStartRequest["voice"];
+    viewed?: GrokVoiceViewed;
+    delegatorModel?: string | undefined;
+  }) {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -61,6 +65,8 @@ export class ChatGptCall {
     this.peer = peer;
     for (const track of this.stream.getAudioTracks()) peer.addTrack(track, this.stream);
     this.channel = peer.createDataChannel("oai-events");
+    // GPT-Live's own events show who is talking without a round trip through the server.
+    this.channel.onmessage = (message: MessageEvent<string>) => this.onLiveEvent(message.data);
     // A media element pulls the remote track in Chromium; Web Audio alone can report silence.
     this.audio = new Audio();
     this.audio.autoplay = true;
@@ -87,6 +93,7 @@ export class ChatGptCall {
       startChatGptVoiceCall(this.prepared, {
         sdp: peer.localDescription?.sdp ?? "",
         voice: input.voice,
+        ...(input.delegatorModel ? { delegatorModel: input.delegatorModel } : {}),
         ...(input.viewed ? { viewed: input.viewed } : {}),
       }),
     );
@@ -133,6 +140,21 @@ export class ChatGptCall {
     if (this.audio) this.audio.srcObject = null;
     void this.context?.close().catch(() => {});
     this.callbacks.onStatus("closed", detail);
+  }
+
+  private onLiveEvent(data: string) {
+    let event: { type?: string; turn?: { role?: string } };
+    try {
+      event = JSON.parse(data) as typeof event;
+    } catch {
+      return;
+    }
+    const speaking = (who: "user" | "assistant" | null) =>
+      this.callbacks.onEvent({ type: "speaking", who });
+    if (event.type === "input_transcript.added") speaking("user");
+    else if (event.type === "output_transcript.added") speaking("assistant");
+    else if (event.type === "turn.done" || event.type === "output_audio_buffer.cleared")
+      speaking(null);
   }
 
   private endOnServer() {

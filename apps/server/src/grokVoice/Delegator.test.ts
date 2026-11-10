@@ -18,7 +18,7 @@ const say = (text: string) => ({ type: "message", content: [{ type: "output_text
 
 function scripted(rounds: unknown[][], results: Record<string, unknown> = {}) {
   const calls: { name: string; args: Record<string, unknown> }[] = [];
-  const deps: DelegatorDeps = {
+  const deps: { -readonly [K in keyof DelegatorDeps]: DelegatorDeps[K] } = {
     tools: [
       {
         name: "t3_thread_send",
@@ -131,6 +131,23 @@ describe("runDelegation", () => {
       { name: "answer_approval", args: { threadId: "t1", requestId: "r1", decision: "accept" } },
     ]);
     expect(result.sent).toEqual([{ threadId: "t1", title: "Docs", instruction: "approve it" }]);
+  });
+});
+
+describe("thread reads", () => {
+  it("caps each read and stops a model from paging a thread forever", async () => {
+    const { deps, calls } = scripted([
+      [call("t3_thread_read", { threadId: "t1", limit: 40, maxCharsPerItem: 6000 }, "a")],
+      [call("t3_thread_read", { threadId: "t1" }, "b")],
+      [call("t3_thread_read", { threadId: "t1" }, "c")],
+      [say("Done.")],
+    ]);
+    deps.tools = [...deps.tools, { name: "t3_thread_read", inputSchema: { type: "object" } }];
+    await runDelegation(deps, { request: "check it", transcript: [], explained: [] });
+    expect(calls.map((entry) => entry.args)).toEqual([
+      { threadId: "t1", limit: 10, maxCharsPerItem: 800, view: "messages" },
+      { threadId: "t1", limit: 8, maxCharsPerItem: 600, view: "messages" },
+    ]);
   });
 });
 

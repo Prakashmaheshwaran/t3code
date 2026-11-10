@@ -21,8 +21,16 @@ export const ChatGptVoiceStartRequest = Schema.Struct({
   sdp: Schema.String,
   voice: ChatGptVoiceName,
   viewed: Schema.optionalKey(GrokVoiceViewed),
+  /** The Codex model the delegator thinks with; the server's default when omitted. */
+  delegatorModel: Schema.optionalKey(Schema.String),
 });
 export type ChatGptVoiceStartRequest = typeof ChatGptVoiceStartRequest.Type;
+
+export const ChatGptVoiceModels = Schema.Struct({
+  models: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String })),
+  default: Schema.NullOr(Schema.String),
+});
+export type ChatGptVoiceModels = typeof ChatGptVoiceModels.Type;
 
 export const ChatGptVoiceStartResult = Schema.Struct({ callId: Schema.String, sdp: Schema.String });
 export type ChatGptVoiceStartResult = typeof ChatGptVoiceStartResult.Type;
