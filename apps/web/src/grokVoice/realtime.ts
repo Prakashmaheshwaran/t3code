@@ -2,6 +2,7 @@
 // events), the microphone in, and scheduled PCM playback out. No React here.
 
 import captureWorkletUrl from "./captureWorklet.ts?worker&url";
+import { openCallMicrophone, watchMicrophone } from "./microphone";
 
 const SAMPLE_RATE = 24_000;
 
@@ -61,6 +62,7 @@ export class GrokRealtimeCall {
   private playhead = 0;
   private playing = new Set<AudioBufferSourceNode>();
   private muted = false;
+  private heard: ((level: number) => void) | undefined;
   private closed = false;
   private userText = "";
   private assistantText = "";
@@ -72,15 +74,12 @@ export class GrokRealtimeCall {
   async start(options: RealtimeOptions) {
     this.callbacks.onStatus("connecting");
     this.context = new AudioContext({ sampleRate: SAMPLE_RATE });
+    // Created after awaits, so Chrome no longer counts the click and starts it suspended.
+    void this.context.resume().catch(() => {});
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
+      this.stream = await openCallMicrophone();
+      const note = this.callbacks.onNote;
+      this.heard = note ? watchMicrophone(this.stream, note) : undefined;
       await this.context.audioWorklet.addModule(captureWorkletUrl);
       const source = this.context.createMediaStreamSource(this.stream);
       const capture = new AudioWorkletNode(this.context, "grok-capture");
@@ -195,6 +194,7 @@ export class GrokRealtimeCall {
     for (let i = 0; i < frame.length; i += 8) peak = Math.max(peak, Math.abs(frame[i]!));
     this.callbacks.onLevel?.(this.muted ? 0 : peak);
     if (this.muted) return;
+    this.heard?.(peak);
     this.send({ type: "input_audio_buffer.append", audio: toBase64Pcm16(frame) });
   }
 

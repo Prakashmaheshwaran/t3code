@@ -15,6 +15,7 @@ import type {
 } from "@t3tools/contracts";
 
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
+import { openCallMicrophone, watchMicrophone } from "./microphone";
 import type { readPreparedConnection } from "../state/session";
 
 type PreparedConnection = NonNullable<ReturnType<typeof readPreparedConnection>>;
@@ -38,6 +39,7 @@ export class ChatGptCall {
   private levelTimer: ReturnType<typeof setInterval> | undefined;
   private callId: string | undefined;
   private stopped = false;
+  private muted = false;
 
   constructor(prepared: PreparedConnection, callbacks: ChatGptCallCallbacks) {
     this.prepared = prepared;
@@ -50,9 +52,7 @@ export class ChatGptCall {
     delegatorModel?: string | undefined;
   }) {
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+      this.stream = await openCallMicrophone();
     } catch (error) {
       throw new Error(
         error instanceof DOMException && error.name === "NotAllowedError"
@@ -108,6 +108,7 @@ export class ChatGptCall {
   }
 
   setMuted(muted: boolean) {
+    this.muted = muted;
     for (const track of this.stream?.getAudioTracks() ?? []) track.enabled = !muted;
     if (this.channel?.readyState === "open")
       this.channel.send(
@@ -165,16 +166,22 @@ export class ChatGptCall {
   private meter() {
     if (!this.stream) return;
     this.context = new AudioContext();
+    // Created after awaits, so Chrome no longer counts the click and starts it suspended.
+    void this.context.resume().catch(() => {});
     const analyser = this.context.createAnalyser();
     analyser.fftSize = 512;
     this.context.createMediaStreamSource(this.stream).connect(analyser);
     const samples = new Float32Array(analyser.fftSize);
+    const heard = watchMicrophone(this.stream, (text) =>
+      this.callbacks.onEvent({ type: "note", text }),
+    );
     this.levelTimer = setInterval(() => {
       analyser.getFloatTimeDomainData(samples);
       let peak = 0;
       for (let index = 0; index < samples.length; index += 4)
         peak = Math.max(peak, Math.abs(samples[index]!));
-      this.callbacks.onLevel(peak);
+      if (!this.muted) heard(peak);
+      this.callbacks.onLevel(this.muted ? 0 : peak);
     }, 100);
   }
 
