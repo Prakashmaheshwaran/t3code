@@ -6,6 +6,7 @@ import { CloudSpeechError, SPEECH_STREAM_PATH } from "@t3tools/contracts";
 import type {
   CloudSpeechModelId,
   CloudSpeechProvider,
+  GrokVoiceRespondRequest,
   SettingsSecretValue,
   SpeechAcceleration,
   SpeechModelUnloadTimeout,
@@ -299,4 +300,23 @@ export const removeEnvironmentSpeechModel = (prepared: PreparedConnection, model
     method: "POST",
     path: (urls) => urls.removeModel(),
     run: ({ client, headers }) => client.removeModel({ headers, payload: { modelId } }),
+  });
+
+export const createGrokVoiceSession = (prepared: PreparedConnection) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    path: (urls) => urls.grokSession(),
+    run: ({ client, headers }) => client.grokSession({ headers }),
+  });
+
+export const grokVoiceRespond = (prepared: PreparedConnection, payload: GrokVoiceRespondRequest) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    timeoutMs: 70_000,
+    path: (urls) => urls.grokRespond(),
+    run: ({ client, headers }) => client.grokRespond({ headers, payload }),
   });

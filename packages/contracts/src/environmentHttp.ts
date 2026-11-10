@@ -10,6 +10,12 @@ import * as HttpServerRespondable from "effect/http/HttpServerRespondable";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
 import {
+  GrokVoiceError,
+  GrokVoiceRespondRequest,
+  GrokVoiceRespondResult,
+  GrokVoiceSession,
+} from "./grokVoice.ts";
+import {
   AuthAccessTokenResult,
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
@@ -920,6 +926,21 @@ export class EnvironmentVoiceHttpApi extends HttpApiGroup.make("voice")
       payload: EnvironmentSpeechPostProcessingRequest,
       success: EnvironmentSpeechPostProcessingResult,
       error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("grokSession", "/api/voice/grok/session", {
+      headers: OptionalBearerHeaders,
+      success: GrokVoiceSession,
+      error: [...EnvironmentScopedOperationErrors, GrokVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("grokRespond", "/api/voice/grok/respond", {
+      headers: OptionalBearerHeaders,
+      payload: GrokVoiceRespondRequest,
+      success: GrokVoiceRespondResult,
+      error: [...EnvironmentScopedOperationErrors, GrokVoiceError],
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

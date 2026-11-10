@@ -22,6 +22,7 @@ import {
 } from "../auth/http.ts";
 import * as SpeechPostProcessing from "./postProcessing.ts";
 import * as CloudSpeech from "./CloudSpeech.ts";
+import * as GrokVoice from "../grokVoice/GrokVoice.ts";
 import * as SpeechService from "./SpeechService.ts";
 
 const MAX_TRANSCRIBE_BODY_BYTES = SpeechService.MAX_SPEECH_BYTES + SPEECH_MAX_OPTIONS_BYTES + 4;
@@ -59,6 +60,7 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const speech = yield* SpeechService.SpeechService;
     const cloud = yield* CloudSpeech.CloudSpeech;
+    const grok = yield* GrokVoice.GrokVoice;
     const postProcessing = yield* SpeechPostProcessing.SpeechPostProcessing;
     const guard = Effect.fnUntraced(function* (
       endpoint: string,
@@ -197,6 +199,20 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
           return yield* postProcessing
             .process(args.payload)
             .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+        }),
+      )
+      .handle(
+        "grokSession",
+        Effect.fn("environment.voice.grokSession")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* grok.session;
+        }),
+      )
+      .handle(
+        "grokRespond",
+        Effect.fn("environment.voice.grokRespond")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* grok.respond(args.payload);
         }),
       );
   }),
