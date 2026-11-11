@@ -335,6 +335,8 @@ export const startChatGptVoiceCall = (
     group: "voice",
     prepared,
     method: "POST",
+    // A resume may first fold the call's notes; the server answers well inside this.
+    timeoutMs: 60_000,
     path: (urls) => urls.chatgptStart(),
     run: ({ client, headers }) => client.chatgptStart({ headers, payload }),
   });

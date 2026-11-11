@@ -48,6 +48,27 @@ function scripted(rounds: unknown[][], results: Record<string, unknown> = {}) {
 }
 
 describe("runDelegation", () => {
+  it("shows the delegator the call's notes but keeps them out of thread messages", async () => {
+    const { deps, calls } = scripted([
+      [call("t3_thread_send", { threadId: "t1", message: "Shorten it.", mode: "steer" })],
+      [say("Sent.")],
+    ]);
+    const inputs: unknown[] = [];
+    const respond = deps.respond;
+    deps.respond = async (body) => {
+      inputs.push(structuredClone(body.input));
+      return respond(body);
+    };
+    await runDelegation(deps, {
+      request: "shorten that one",
+      transcript: ["User: shorten that one"],
+      explained: [],
+      memory: "- Started the README thread.",
+    });
+    expect(JSON.stringify(inputs[0])).toContain("Started the README thread.");
+    expect(String(calls[0]?.args.message)).not.toContain("README thread");
+  });
+
   it("hands threads the user's own words, with the full header only the first time", async () => {
     const { deps, calls } = scripted([
       [call("t3_thread_send", { threadId: "t1", message: "Fix the README typo.", mode: "steer" })],

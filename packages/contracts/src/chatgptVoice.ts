@@ -23,6 +23,11 @@ export const ChatGptVoiceStartRequest = Schema.Struct({
   viewed: Schema.optionalKey(GrokVoiceViewed),
   /** The Codex model the delegator thinks with; the server's default when omitted. */
   delegatorModel: Schema.optionalKey(Schema.String),
+  /**
+   * A call to continue in a fresh realtime session, seeded with that call's notes. Used before a
+   * long session runs out of room, and after one drops.
+   */
+  resume: Schema.optionalKey(Schema.String),
 });
 export type ChatGptVoiceStartRequest = typeof ChatGptVoiceStartRequest.Type;
 
@@ -54,7 +59,12 @@ export const ChatGptVoiceEvent = Schema.Union([
     sent: Schema.Array(GrokVoiceSentPrompt),
   }),
   Schema.Struct({ type: Schema.Literal("note"), text: Schema.String }),
-  Schema.Struct({ type: Schema.Literal("closed"), reason: Schema.optionalKey(Schema.String) }),
+  Schema.Struct({
+    type: Schema.Literal("closed"),
+    reason: Schema.optionalKey(Schema.String),
+    /** Only the realtime session ended; the call can go on in a new one with `resume`. */
+    resumable: Schema.optionalKey(Schema.Boolean),
+  }),
 ]);
 export type ChatGptVoiceEvent = typeof ChatGptVoiceEvent.Type;
 
@@ -68,6 +78,8 @@ export const ChatGptVoiceContextRequest = Schema.Struct({
   viewed: Schema.optionalKey(GrokVoiceViewed),
   /** News for the voice agent to tell the user, such as a thread finishing. */
   announce: Schema.optionalKey(Schema.String),
+  /** News the app already told the voice agent itself, kept in the call's notes. */
+  remember: Schema.optionalKey(Schema.String),
 });
 export type ChatGptVoiceContextRequest = typeof ChatGptVoiceContextRequest.Type;
 

@@ -108,6 +108,7 @@ You manage threads; you never write code yourself. Coding work happens by sendin
 - To change a thread's model or effort ("use Opus", "switch to high"), find the model with orchestrator_capabilities, then t3_thread_configure. Switch only when asked; if several models fit, ask which.
 - "What is it waiting for?" or "does it need anything?": call pending_approvals first. Permission requests a thread is waiting on: pending_approvals, then answer_approval once the user clearly decided ("approve", "allow for this session", "deny"). If they ask what it wants, read the thread with view "activity" and describe it in plain words. Questions a thread asks the user go through t3_pending_request.
 - To close a thread, archive it with t3_thread_organize. Rename with t3_thread_update.
+- Notes from earlier say what this call (and recent calls) already did. Use them to resolve "that thread", "the one from before", or "what did we decide", then check the thread itself for its current state. Never act on the notes alone.
 - What a thread already wrote, you read; never ask it to restate it.
 - Write messages to threads as clear instructions that keep the user's exact intent, audience, and destination. The app attaches the user's own words and the voice transcript to every message, so don't paste the transcript in.
 - When an admission is uncertain, do not resend: read the thread to check.
@@ -252,7 +253,7 @@ export async function runDelegation(
   const conversation: unknown[] = [
     {
       role: "user",
-      content: `Request: ${input.request}\n\nRecent voice conversation:\n${input.transcript.join("\n") || "(none)"}`,
+      content: `${input.memory ? `Notes from earlier, for context only:\n${input.memory}\n\n` : ""}Request: ${input.request}\n\nRecent voice conversation:\n${input.transcript.join("\n") || "(none)"}`,
     },
   ];
 

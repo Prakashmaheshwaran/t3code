@@ -36,14 +36,20 @@ export const VOICE_PROVIDERS: Record<VoiceProvider, { label: string; voices: rea
 const VOICE_KEY = "t3code:grok-voice:voice";
 const PROVIDER_KEY = "t3code:grok-voice:provider";
 const DELEGATOR_MODEL_KEY = "t3code:grok-voice:chatgpt-delegator-model";
-const MAX_LINES = 40;
+// The whole call stays readable in the panel; ChatGPT calls are also saved by the server.
+const MAX_LINES = 1000;
 const ANNOUNCE_CHARS = 800;
 const MAX_DELTA_LINES = 20;
 const DELEGATION_HOLD_MS = 20_000;
 // A moment of silence after an answer, so news doesn't ride on its tail.
 const QUIET_MS = 1200;
+// A long GPT-Live session loses the start of the call, so the call moves to a fresh one seeded
+// with its notes, at the first quiet moment after this long.
+const REFRESH_AFTER_MS = 20 * 60_000;
+const REFRESH_QUIET_MS = 4000;
 
 export interface CallLine {
+  readonly id: number;
   readonly who: "you" | "grok" | "note";
   readonly text: string;
 }
@@ -109,8 +115,9 @@ export const useGrokVoiceStore = create<GrokVoiceState>()(() => ({
 }));
 
 const set = useGrokVoiceStore.setState;
-const addLine = (line: CallLine) =>
-  set((state) => ({ lines: [...state.lines, line].slice(-MAX_LINES) }));
+let lineIds = 0;
+const addLine = (line: Omit<CallLine, "id">) =>
+  set((state) => ({ lines: [...state.lines, { ...line, id: ++lineIds }].slice(-MAX_LINES) }));
 
 let router: AnyRouter | null = null;
 interface VoiceCall {
@@ -119,6 +126,8 @@ interface VoiceCall {
   readonly setMuted: (muted: boolean) => void;
   readonly stop: () => void;
   readonly microphone: MediaStream | undefined;
+  /** Moving to a new realtime session, which news must wait for. */
+  readonly switchingSessions?: boolean;
 }
 
 let active: {
@@ -357,6 +366,12 @@ async function startGrokVoiceCall() {
   const flushNews = () => {
     const state = useGrokVoiceStore.getState();
     if (ended || !announcer || news.length === 0) return;
+    // News sent while the call moves to a new session would reach the old one and be lost.
+    if (announcer.switchingSessions) {
+      clearTimeout(recheck);
+      recheck = setTimeout(flushNews, QUIET_MS);
+      return;
+    }
     newsSince ||= Date.now();
     const busy = state.speaking !== null || state.delegating > 0;
     const wait = busy ? newsSince + DELEGATION_HOLD_MS - Date.now() : QUIET_MS - quietFor();
@@ -458,10 +473,24 @@ async function startGrokVoiceCall() {
     });
     announcer = call;
     const stopFollowing = appRouter.subscribe("onResolved", () => call.updateViewed(viewed()));
+    const refresher = setInterval(() => {
+      const state = useGrokVoiceStore.getState();
+      if (state.status !== "live" || call.switchingSessions) return;
+      if (call.sessionAge < REFRESH_AFTER_MS) return;
+      if (news.length > 0 || state.delegating > 0 || quietFor() < REFRESH_QUIET_MS) return;
+      addLine({
+        who: "note",
+        text: "Refreshing the call so it keeps up with a long conversation…",
+      });
+      void call.refresh().then((refreshed) => {
+        if (refreshed) addLine({ who: "note", text: "Refreshed, with this call's notes." });
+      });
+    }, 5000);
     const dispose = () => {
       if (ended) return;
       ended = true;
       clearTimeout(recheck);
+      clearInterval(refresher);
       active?.unmute?.stop();
       stopFollowing();
       unsubscribeGate();
