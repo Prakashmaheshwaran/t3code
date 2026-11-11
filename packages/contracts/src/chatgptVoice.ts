@@ -28,6 +28,10 @@ export const ChatGptVoiceStartRequest = Schema.Struct({
    * long session runs out of room, and after one drops.
    */
   resume: Schema.optionalKey(Schema.String),
+  /** The language the voice always answers in; it matches the user's when omitted. */
+  replyLanguage: Schema.optionalKey(Schema.String),
+  /** Days to keep the call in the history; 0 doesn't save it. Kept until pruned when omitted. */
+  keepDays: Schema.optionalKey(Schema.Number),
 });
 export type ChatGptVoiceStartRequest = typeof ChatGptVoiceStartRequest.Type;
 

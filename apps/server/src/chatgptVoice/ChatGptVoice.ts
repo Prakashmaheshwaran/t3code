@@ -24,52 +24,36 @@ import * as NodePath from "node:path";
 
 import * as ServerConfig from "../config.ts";
 import * as GrokVoice from "../grokVoice/GrokVoice.ts";
+import {
+  CallLog,
+  KEEP_LINES,
+  delegationMemory,
+  render,
+  seedItems,
+  spoken,
+  standingInstructions,
+  type Summarize,
+} from "../voiceCalls/memory.ts";
+import { recentNotes, saveCall, voiceCallsDir } from "../voiceCalls/store.ts";
 
 const RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_BINARIES = ["codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"];
 // Used when the call doesn't name a model and the account still offers it.
 const PREFERRED_DELEGATOR_MODEL =
-  process.env.T3_CHATGPT_VOICE_DELEGATOR_MODEL?.trim() || "gpt-5.6-luna";
+  process.env.T3_CHATGPT_VOICE_DELEGATOR_MODEL?.trim() || "gpt-6.1-terra";
 const TOKEN_MARGIN_MS = 5 * 60_000;
 const POLL_WAIT_MS = 25_000;
 // A call nobody polls is a call nobody hears; end it rather than burn the voice allowance.
 const ABANDONED_MS = 45_000;
-// Conversation not yet in the notes beyond this folds into them, keeping the newest lines as said.
-const FOLD_AT_CHARS = 6_000;
-const KEEP_LINES = 12;
-const NOTES_MAX_CHARS = 4_000;
-const LINE_MAX_CHARS = 800;
 const FOLD_TIMEOUT_MS = 15_000;
 // A resume answers well inside the app's request timeout; a slow fold leaves more lines verbatim.
 const RESUME_FOLD_WAIT_MS = 4_000;
-// After a failed fold, the next waits this long rather than retrying on every line.
-const FOLD_RETRY_MS = 60_000;
 const RESPONSES_TIMEOUT_MS = 90_000;
 // An old session's thread stays loaded briefly, for transcripts that arrive after the switch.
 const OLD_THREAD_LINGER_MS = 15_000;
 const SAVE_WAIT_MS = 5_000;
-const TRANSCRIPTS_KEPT = 200;
 // A session that drops waits this long for the app to continue the call in a new one.
 const RESUME_GRACE_MS = 60_000;
-const RECENT_CALLS_KEPT = 3;
-const RECENT_CALLS_FRESH_MS = 24 * 60 * 60_000;
-const EARLIER_MAX_CHARS = 3_000;
-const SEED_MAX_BYTES = 24_000;
-const SEED_MAX_ITEMS = 120;
-
-const NOTES_INSTRUCTIONS = `You keep the running notes of a voice call between a user and T3 Code's voice assistant, which hands their requests to coding threads. Update the notes with the new part of the conversation.
-Keep what a later request could refer back to: what the user asked for, what was done and in which thread (by title), decisions, open questions, pending work, and preferences the user stated (such as the language to answer in).
-Drop greetings, filler, and anything later superseded. Plain text, one short line per point, at most 250 words. Reply with the notes only.`;
-
-type Speaker = "User" | "Voice agent" | "T3 Code" | "Update";
-interface Line {
-  readonly at: number;
-  readonly who: Speaker;
-  readonly text: string;
-}
-const render = (line: Line) => `${line.who}: ${line.text}`;
-/** What the voice agent and the user said, as opposed to T3 Code's own records. */
-const spoken = (line: Line) => line.who === "User" || line.who === "Voice agent";
 
 function jwtClaims(token: string): Record<string, unknown> {
   const part = token.split(".")[1];
@@ -197,7 +181,7 @@ class AppServer {
  * One voice call. It outlives its realtime sessions: each session runs on its own ephemeral
  * Codex thread, and a new one picks up the call's notes and latest lines.
  */
-class Call {
+class Call extends CallLog {
   readonly id = crypto.randomUUID();
   readonly startedAt = Date.now();
   /** The Codex thread of the current realtime session. */
@@ -205,17 +189,15 @@ class Call {
   readonly events: { seq: number; event: ChatGptVoiceEvent }[] = [];
   private seq = 0;
   private waiters = new Set<() => void>();
-  readonly lines: Line[] = [];
   delegatedUpTo = 0;
-  /** A summary of `lines` before `foldedUpTo`. */
-  notes = "";
-  foldedUpTo = 0;
-  folding: Promise<void> | undefined;
-  /** Notes from the user's recent earlier calls. */
-  earlier = "";
   explained: string[] = [];
   viewed: GrokVoiceViewed | undefined;
   delegatorModel: string | undefined;
+  /** Standing instructions for the voice, such as the language to answer in. */
+  standing: ReadonlyArray<string> = [];
+  replyLanguage: string | undefined;
+  /** Days to keep the saved call; 0 saves nothing. Unset keeps it until pruned. */
+  keepDays: number | undefined;
   lastPoll = Date.now();
   /** The call is over; nothing resumes it. */
   closed = false;
@@ -223,7 +205,6 @@ class Call {
   switching = false;
   /** Earlier sessions' threads, whose last transcripts may still arrive. */
   readonly pastThreads = new Set<string>();
-  foldFailedAt = 0;
   /** Codex's last realtime error, which says why a session closed. */
   lastError = "";
   dropTimer: ReturnType<typeof setTimeout> | undefined;
@@ -231,11 +212,6 @@ class Call {
   readonly handled = new Set<string>();
   /** Handoffs carry the user's words before Live's final transcript of them arrives. */
   readonly delegatedWords = new Set<string>();
-
-  add(who: Speaker, text: string) {
-    const trimmed = text.trim();
-    if (trimmed) this.lines.push({ at: Date.now(), who, text: trimmed.slice(0, LINE_MAX_CHARS) });
-  }
 
   push(event: ChatGptVoiceEvent) {
     this.events.push({ seq: ++this.seq, event });
@@ -265,105 +241,6 @@ class Call {
       this.waiters.add(done);
     });
   }
-}
-
-interface CallMemory {
-  readonly lines: ReadonlyArray<Line>;
-  readonly notes: string;
-  readonly foldedUpTo: number;
-  readonly earlier: string;
-}
-
-/** Where to fold the notes up to now, or null while the unsummarized part is still short. */
-export function nextFold(memory: Pick<CallMemory, "lines" | "foldedUpTo">) {
-  const upTo = memory.lines.length - KEEP_LINES;
-  if (upTo <= memory.foldedUpTo) return null;
-  let chars = 0;
-  for (const line of memory.lines.slice(memory.foldedUpTo, upTo)) chars += line.text.length + 14;
-  return chars >= FOLD_AT_CHARS ? upTo : null;
-}
-
-/**
- * What a delegation may need from before its own transcript delta: recent calls, this call's
- * notes, and the lines since the notes, verbatim.
- */
-export function delegationMemory(memory: CallMemory, deltaStart: number) {
-  const since = memory.lines
-    .slice(memory.foldedUpTo, deltaStart)
-    .slice(-30)
-    .map(render)
-    .join("\n")
-    .slice(-4_000);
-  const parts = [
-    memory.earlier && `Recent earlier calls (may be out of date):\n${memory.earlier}`,
-    memory.notes && `This call so far:\n${memory.notes}`,
-    since && `Then, word for word:\n${since}`,
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join("\n\n") : undefined;
-}
-
-/** History a realtime session starts with, so it knows the call it joins. */
-export function seedItems(memory: CallMemory, resumed: boolean) {
-  const context = [
-    resumed &&
-      "This call continues from an earlier realtime session, which was refreshed to keep the call going. Carry on naturally and don't mention the refresh unless asked.",
-    memory.earlier &&
-      `Notes from the user's recent earlier calls, which may be out of date:\n${memory.earlier}`,
-    memory.notes && `Notes on this call so far:\n${memory.notes}`,
-  ].filter(Boolean);
-  const items: { role: "developer" | "user" | "assistant"; text: string }[] = [];
-  const header = context.join("\n\n");
-  if (header) items.push({ role: "developer", text: header });
-  if (!resumed) return items;
-  // Codex refuses more than 128 items, or about 8k tokens, which it estimates from bytes.
-  let budget = SEED_MAX_BYTES - Buffer.byteLength(header);
-  const recent: typeof items = [];
-  for (const line of memory.lines.slice(memory.foldedUpTo).toReversed()) {
-    budget -= Buffer.byteLength(line.text) + 16;
-    if (budget < 0 || items.length + recent.length >= SEED_MAX_ITEMS) break;
-    recent.unshift(
-      line.who === "User"
-        ? { role: "user", text: line.text }
-        : line.who === "Voice agent"
-          ? { role: "assistant", text: line.text }
-          : { role: "developer", text: render(line) },
-    );
-  }
-  return [...items, ...recent];
-}
-
-/** The notes of calls that ended within the last day, newest last. */
-export function recentCallNotes(
-  calls: ReadonlyArray<{ endedAt: number; notes: string }>,
-  now: number,
-) {
-  return calls
-    .filter((call) => now - call.endedAt < RECENT_CALLS_FRESH_MS && call.notes.trim())
-    .map((call) => `Call that ended ${new Date(call.endedAt).toLocaleString()}:\n${call.notes}`)
-    .join("\n\n")
-    .slice(-EARLIER_MAX_CHARS);
-}
-
-/** A call as a readable file: its notes, then everything said. */
-export function callTranscript(
-  call: Pick<CallMemory, "lines" | "notes"> & { startedAt: number },
-  endedAt: number,
-) {
-  const time = (at: number) => new Date(at).toLocaleTimeString();
-  return [
-    `# Voice call, ${new Date(call.startedAt).toLocaleString()}`,
-    "",
-    `Ended ${new Date(endedAt).toLocaleString()}.`,
-    "",
-    "## Notes",
-    "",
-    call.notes || "(none)",
-    "",
-    "## Transcript",
-    "",
-    ...call.lines.map((line) => `[${time(line.at)}] ${render(line)}`),
-    "",
-  ].join("\n");
 }
 
 export class ChatGptVoice extends Context.Service<
@@ -408,9 +285,7 @@ export const layer = Layer.effect(
     const calls = new Map<string, Call>();
     const stateDir = NodePath.dirname(config.serverRuntimeStatePath);
     const workDir = NodePath.join(stateDir, "voice-codex");
-    // Every call's notes and transcript, and the notes the next call starts with.
-    const callsDir = NodePath.join(stateDir, "voice-calls");
-    const recentCallsPath = NodePath.join(callsDir, "recent.json");
+    const callsDir = voiceCallsDir(stateDir);
     let server: Promise<AppServer> | undefined;
     let token: { value: string; accountId: string; expiresAt: number } | undefined;
 
@@ -572,87 +447,38 @@ export const layer = Layer.effect(
         .join("")
         .trim();
 
-    /** Summarizes the lines before `upTo` into the call's notes, one fold at a time. */
-    const fold = (call: Call, upTo: number) => {
-      const run = (call.folding ?? Promise.resolve())
-        .then(async () => {
-          const part = call.lines.slice(call.foldedUpTo, upTo);
-          if (part.length === 0) return;
-          const notes = outputText(
-            await runPromise(
-              responder(call)({
-                instructions: NOTES_INSTRUCTIONS,
-                input: [
-                  {
-                    role: "user",
-                    content: `Notes so far:\n${call.notes || "(none)"}\n\nNew conversation:\n${part.map(render).join("\n")}`,
-                  },
-                ],
-                tools: [],
-              }),
-            ),
-          );
-          if (!notes) throw new Error("No notes came back.");
-          call.notes = notes.slice(0, NOTES_MAX_CHARS);
-          call.foldedUpTo = Math.max(call.foldedUpTo, upTo);
-        })
-        .catch(() => {
-          call.foldFailedAt = Date.now();
-        })
-        .finally(() => {
-          if (call.folding === run) call.folding = undefined;
-        });
-      call.folding = run;
-      return run;
-    };
-
-    /** Folds once the unsummarized conversation grows long; never in the way of the call. */
-    const foldIfLong = (call: Call) => {
-      if (call.folding || Date.now() - call.foldFailedAt < FOLD_RETRY_MS) return;
-      const upTo = nextFold(call);
-      if (upTo !== null) void fold(call, upTo);
-    };
+    /** Notes come from the call's own thinking model, without tools. */
+    const summarizer =
+      (call: Call): Summarize =>
+      async ({ instructions, input }) =>
+        outputText(
+          await runPromise(
+            responder(call)({ instructions, input: [{ role: "user", content: input }], tools: [] }),
+          ),
+        );
+    const fold = (call: Call, upTo: number) => call.fold(upTo, summarizer(call));
+    const foldIfLong = (call: Call) => call.foldIfLong(summarizer(call));
 
     const within = (work: Promise<unknown>, ms: number) =>
       Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms))]);
 
-    const readRecentCalls = (): { endedAt: number; notes: string }[] => {
-      try {
-        const parsed = JSON.parse(NodeFS.readFileSync(recentCallsPath, "utf8")) as unknown;
-        return Array.isArray(parsed)
-          ? parsed.filter(
-              (entry): entry is { endedAt: number; notes: string } =>
-                typeof entry?.endedAt === "number" && typeof entry?.notes === "string",
-            )
-          : [];
-      } catch {
-        return [];
-      }
-    };
-
-    /** Writes the call's transcript, and keeps its notes for the next calls. */
+    /** Saves the call with its final notes, for the history and the next calls. */
     const save = async (call: Call) => {
-      if (call.lines.length === 0) return;
+      if (call.lines.length === 0 || call.keepDays === 0) return;
       await within(fold(call, call.lines.length), FOLD_TIMEOUT_MS);
-      const endedAt = Date.now();
       try {
-        NodeFS.mkdirSync(callsDir, { recursive: true });
-        const stamp = new Date(call.startedAt).toISOString().replace(/[:.]/g, "-");
-        NodeFS.writeFileSync(
-          NodePath.join(callsDir, `${stamp}-${call.id.slice(0, 8)}.md`),
-          callTranscript(call, endedAt),
+        saveCall(
+          callsDir,
+          {
+            id: call.id,
+            provider: "chatgpt",
+            startedAt: call.startedAt,
+            endedAt: Date.now(),
+            notes: call.notes,
+            lines: call.lines,
+          },
+          call.keepDays,
         );
-        // Names start with the time, so the oldest sort first.
-        const transcripts = NodeFS.readdirSync(callsDir).filter((name) => name.endsWith(".md"));
-        for (const name of transcripts.toSorted().slice(0, -TRANSCRIPTS_KEPT))
-          NodeFS.rmSync(NodePath.join(callsDir, name), { force: true });
-        if (call.notes)
-          NodeFS.writeFileSync(
-            recentCallsPath,
-            JSON.stringify(
-              [...readRecentCalls(), { endedAt, notes: call.notes }].slice(-RECENT_CALLS_KEPT),
-            ),
-          );
       } catch {}
     };
 
@@ -735,6 +561,7 @@ export const layer = Layer.effect(
             ...(call.viewed ? { viewed: call.viewed } : {}),
             explained: call.explained,
             ...(memory ? { memory } : {}),
+            ...(call.replyLanguage ? { replyLanguage: call.replyLanguage } : {}),
           },
           responder(call),
         ),
@@ -877,7 +704,7 @@ export const layer = Layer.effect(
         }
       };
       // Codex measures the seed itself. If it refuses, the notes alone, then nothing, beat no call.
-      const seed = seedItems(call, resumed);
+      const seed = seedItems(call, resumed, call.standing);
       const fallbacks = [seed, seed.slice(0, 1), []].filter(
         (items, index, all) => index === 0 || items.length < all[index - 1]!.length,
       );
@@ -932,8 +759,11 @@ export const layer = Layer.effect(
         const call = new Call();
         call.viewed = request.viewed;
         call.delegatorModel = request.delegatorModel;
+        call.keepDays = request.keepDays;
+        call.replyLanguage = request.replyLanguage;
+        call.standing = standingInstructions(request.replyLanguage);
         await within(Promise.all(saving), SAVE_WAIT_MS);
-        call.earlier = recentCallNotes(readRecentCalls(), Date.now());
+        if (request.keepDays !== 0) call.earlier = recentNotes(callsDir, Date.now());
         calls.set(call.id, call);
         try {
           const sdp = await openSession(call, request.sdp, request.voice, false);
