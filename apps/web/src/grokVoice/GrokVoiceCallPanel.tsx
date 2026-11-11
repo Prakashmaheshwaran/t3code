@@ -151,7 +151,7 @@ export function GrokVoiceCallPanel() {
             size="compact"
             nativeInput
             placeholder="Type instead…"
-            aria-label="Type to Grok"
+            aria-label={`Type to ${name}`}
             autoComplete="off"
           />
         </form>

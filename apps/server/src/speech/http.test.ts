@@ -30,6 +30,8 @@ import * as SpeechService from "./SpeechService.ts";
 import * as CloudSpeech from "./CloudSpeech.ts";
 import * as GrokVoice from "../grokVoice/GrokVoice.ts";
 import * as ChatGptVoice from "../chatgptVoice/ChatGptVoice.ts";
+import * as GrokCalls from "../grokVoice/GrokCalls.ts";
+import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -53,6 +55,10 @@ const dependencies = Layer.mergeAll(
   Layer.mock(CloudSpeech.CloudSpeech)({}),
   Layer.mock(GrokVoice.GrokVoice)({}),
   Layer.mock(ChatGptVoice.ChatGptVoice)({}),
+  Layer.mock(GrokCalls.GrokCalls)({}),
+  ServerConfig.layerTest(process.cwd(), { prefix: "voice-http-test" }).pipe(
+    Layer.provide(NodeServices.layer),
+  ),
   Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
   Layer.mock(ServerSettings.ServerSettingsService)({
     getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),

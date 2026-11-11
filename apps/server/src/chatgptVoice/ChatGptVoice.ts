@@ -804,6 +804,19 @@ export const layer = Layer.effect(
         foldIfLong(call);
       }
       if (request.announce) speak(call, request.announce);
+      const typed = request.say?.trim();
+      if (typed) {
+        call.add("User", typed);
+        foldIfLong(call);
+        yield* tryCodex(async () => {
+          const running = await appServer();
+          await running.request("thread/realtime/appendText", {
+            threadId: call.threadId,
+            text: typed,
+            role: "user",
+          });
+        });
+      }
     });
 
     const end = (callId: string) =>

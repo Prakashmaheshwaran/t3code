@@ -8,6 +8,8 @@ import type {
   CloudSpeechProvider,
   ChatGptVoiceContextRequest,
   ChatGptVoiceStartRequest,
+  GrokCallLines,
+  GrokCallStartRequest,
   GrokVoiceDelegateRequest,
   SettingsSecretValue,
   SpeechAcceleration,
@@ -304,15 +306,6 @@ export const removeEnvironmentSpeechModel = (prepared: PreparedConnection, model
     run: ({ client, headers }) => client.removeModel({ headers, payload: { modelId } }),
   });
 
-export const createGrokVoiceSession = (prepared: PreparedConnection) =>
-  request({
-    group: "voice",
-    prepared,
-    method: "POST",
-    path: (urls) => urls.grokSession(),
-    run: ({ client, headers }) => client.grokSession({ headers }),
-  });
-
 export const grokVoiceDelegate = (
   prepared: PreparedConnection,
   payload: GrokVoiceDelegateRequest,
@@ -381,4 +374,82 @@ export const chatGptVoiceModels = (prepared: PreparedConnection) =>
     method: "GET",
     path: (urls) => urls.chatgptModels(),
     run: ({ client, headers }) => client.chatgptModels({ headers }),
+  });
+
+export const startGrokCallSession = (prepared: PreparedConnection, payload: GrokCallStartRequest) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    path: (urls) => urls.grokCallStart(),
+    run: ({ client, headers }) => client.grokCallStart({ headers, payload }),
+  });
+
+export const addGrokCallLines = (
+  prepared: PreparedConnection,
+  callId: string,
+  payload: GrokCallLines,
+) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    path: (urls) => urls.grokCallLines({ params: { callId } }),
+    run: ({ client, headers }) => client.grokCallLines({ headers, params: { callId }, payload }),
+  });
+
+export const resumeGrokCallSession = (prepared: PreparedConnection, callId: string) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    // The server first folds the call's notes, for a few seconds at most.
+    timeoutMs: 45_000,
+    path: (urls) => urls.grokCallResume({ params: { callId } }),
+    run: ({ client, headers }) => client.grokCallResume({ headers, params: { callId } }),
+  });
+
+export const endGrokCallSession = (prepared: PreparedConnection, callId: string) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "POST",
+    path: (urls) => urls.grokCallEnd({ params: { callId } }),
+    run: ({ client, headers }) => client.grokCallEnd({ headers, params: { callId } }),
+  });
+
+export const listVoiceCalls = (prepared: PreparedConnection) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "GET",
+    path: (urls) => urls.voiceCalls(),
+    run: ({ client, headers }) => client.voiceCalls({ headers }),
+  });
+
+export const readVoiceCall = (prepared: PreparedConnection, callId: string) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "GET",
+    path: (urls) => urls.voiceCall({ params: { callId } }),
+    run: ({ client, headers }) => client.voiceCall({ headers, params: { callId } }),
+  });
+
+export const deleteVoiceCall = (prepared: PreparedConnection, callId: string) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "DELETE",
+    path: (urls) => urls.deleteVoiceCall({ params: { callId } }),
+    run: ({ client, headers }) => client.deleteVoiceCall({ headers, params: { callId } }),
+  });
+
+export const clearVoiceCalls = (prepared: PreparedConnection) =>
+  request({
+    group: "voice",
+    prepared,
+    method: "DELETE",
+    path: (urls) => urls.clearVoiceCalls(),
+    run: ({ client, headers }) => client.clearVoiceCalls({ headers }),
   });

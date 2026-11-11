@@ -27,6 +27,11 @@ export const GrokVoiceDelegateRequest = Schema.Struct({
   memory: Schema.optionalKey(Schema.String),
   /** The language spoken replies are in; the user's own when omitted. */
   replyLanguage: Schema.optionalKey(Schema.String),
+  /**
+   * A call the server remembers (`grokCallStart`). Its own lines then stand in for `transcript`,
+   * and its notes for `memory`.
+   */
+  callId: Schema.optionalKey(Schema.String),
 });
 export type GrokVoiceDelegateRequest = typeof GrokVoiceDelegateRequest.Type;
 

@@ -84,6 +84,8 @@ export const ChatGptVoiceContextRequest = Schema.Struct({
   announce: Schema.optionalKey(Schema.String),
   /** News the app already told the voice agent itself, kept in the call's notes. */
   remember: Schema.optionalKey(Schema.String),
+  /** Something the user typed instead of saying. */
+  say: Schema.optionalKey(Schema.String),
 });
 export type ChatGptVoiceContextRequest = typeof ChatGptVoiceContextRequest.Type;
 

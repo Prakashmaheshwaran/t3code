@@ -20,6 +20,14 @@ export interface RealtimeCallbacks {
   readonly onToolCall: (call: { callId: string; name: string; args: unknown }) => void;
   readonly onLevel?: (level: number) => void;
   readonly onNote?: (text: string) => void;
+  /** The session closed on its own; the call can go on in a new one. */
+  readonly onDropped?: (reason: string) => void;
+}
+
+/** What a session starts knowing about the call, from the server. */
+export interface RealtimeSeedItem {
+  readonly role: "developer" | "user" | "assistant";
+  readonly text: string;
 }
 
 export interface RealtimeOptions {
@@ -28,6 +36,18 @@ export interface RealtimeOptions {
   readonly instructions: string;
   readonly voice: string;
   readonly tools: ReadonlyArray<RealtimeTool>;
+  readonly seed?: ReadonlyArray<RealtimeSeedItem>;
+}
+
+/** The seed as one system message: xAI's item roles and content types vary by role. */
+function seedText(seed: ReadonlyArray<RealtimeSeedItem>) {
+  return seed
+    .map((item) =>
+      item.role === "developer"
+        ? item.text
+        : `${item.role === "user" ? "User" : "You"} said: ${item.text}`,
+    )
+    .join("\n\n");
 }
 
 function toBase64Pcm16(samples: Float32Array) {
@@ -68,6 +88,8 @@ export class GrokRealtimeCall {
   private assistantText = "";
   private responseActive = false;
   private pendingResponses: unknown[] = [];
+  private options: RealtimeOptions | undefined;
+  private sessionStartedAt = 0;
 
   constructor(private readonly callbacks: RealtimeCallbacks) {}
 
@@ -97,31 +119,85 @@ export class GrokRealtimeCall {
       );
     }
 
-    const ws = new WebSocket(options.url, [`xai-client-secret.${options.token}`]);
-    this.ws = ws;
-    ws.onmessage = (event) => this.onEvent(JSON.parse(String(event.data)));
-    ws.onclose = (event) => {
-      if (!this.closed) this.stop(event.reason || `Connection closed (${event.code}).`);
-    };
-    ws.onerror = () => {
-      if (!this.closed) this.stop("Couldn't reach Grok voice.");
-    };
-    ws.onopen = () => {
-      this.send({
-        type: "session.update",
-        session: {
-          instructions: options.instructions,
-          voice: options.voice,
-          turn_detection: { type: "server_vad" },
-          audio: {
-            input: { format: { type: "audio/pcm", rate: SAMPLE_RATE } },
-            output: { format: { type: "audio/pcm", rate: SAMPLE_RATE } },
+    this.options = options;
+    await this.connect(options.url, options.token, options.seed ?? []);
+  }
+
+  /** How long the current session has run. */
+  get sessionAge() {
+    return this.sessionStartedAt ? Date.now() - this.sessionStartedAt : 0;
+  }
+
+  /**
+   * Moves the call onto a new session seeded with what the server remembers. The microphone and
+   * playback carry over; the old socket closes once the new one is open.
+   */
+  async reconnect(session: { url: string; token: string }, seed: ReadonlyArray<RealtimeSeedItem>) {
+    if (this.closed) return;
+    const previous = this.ws;
+    await this.connect(session.url, session.token, seed);
+    try {
+      previous?.close(1000);
+    } catch {}
+  }
+
+  private connect(url: string, token: string, seed: ReadonlyArray<RealtimeSeedItem>) {
+    const options = this.options;
+    if (!options) return Promise.reject(new Error("The call hasn't started."));
+    return new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(url, [`xai-client-secret.${token}`]);
+      let opened = false;
+      ws.onmessage = (event) => {
+        if (this.ws === ws) this.onEvent(JSON.parse(String(event.data)));
+      };
+      ws.onclose = (event) => {
+        if (!opened) return reject(new Error(event.reason || "Couldn't reach Grok voice."));
+        if (this.ws !== ws || this.closed) return;
+        const reason = event.reason || `Connection closed (${event.code}).`;
+        if (this.callbacks.onDropped) this.callbacks.onDropped(reason);
+        else this.stop(reason);
+      };
+      ws.onerror = () => {
+        if (!opened) reject(new Error("Couldn't reach Grok voice."));
+      };
+      ws.onopen = () => {
+        opened = true;
+        if (this.closed) {
+          ws.close(1000);
+          return resolve();
+        }
+        // A new session starts with nothing in flight.
+        this.ws = ws;
+        this.responseActive = false;
+        this.pendingResponses = [];
+        this.sessionStartedAt = Date.now();
+        this.send({
+          type: "session.update",
+          session: {
+            instructions: options.instructions,
+            voice: options.voice,
+            turn_detection: { type: "server_vad" },
+            audio: {
+              input: { format: { type: "audio/pcm", rate: SAMPLE_RATE } },
+              output: { format: { type: "audio/pcm", rate: SAMPLE_RATE } },
+            },
+            tools: options.tools.map((tool) => ({ type: "function", ...tool })),
           },
-          tools: options.tools.map((tool) => ({ type: "function", ...tool })),
-        },
-      });
-      this.callbacks.onStatus("live");
-    };
+        });
+        const context = seedText(seed);
+        if (context)
+          this.send({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "system",
+              content: [{ type: "input_text", text: `The call so far:\n${context}` }],
+            },
+          });
+        this.callbacks.onStatus("live");
+        resolve();
+      };
+    });
   }
 
   /** The microphone the call hears, for listening locally while muted. */
