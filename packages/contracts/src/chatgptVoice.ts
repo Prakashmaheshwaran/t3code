@@ -28,6 +28,10 @@ export const ChatGptVoiceStartRequest = Schema.Struct({
    * long session runs out of room, and after one drops.
    */
   resume: Schema.optionalKey(Schema.String),
+  /** The language the voice always answers in; it matches the user's when omitted. */
+  replyLanguage: Schema.optionalKey(Schema.String),
+  /** Days to keep the call in the history; 0 doesn't save it. Kept until pruned when omitted. */
+  keepDays: Schema.optionalKey(Schema.Number),
 });
 export type ChatGptVoiceStartRequest = typeof ChatGptVoiceStartRequest.Type;
 
@@ -59,6 +63,8 @@ export const ChatGptVoiceEvent = Schema.Union([
     sent: Schema.Array(GrokVoiceSentPrompt),
   }),
   Schema.Struct({ type: Schema.Literal("note"), text: Schema.String }),
+  /** An answer for the voice to tell as news: its session moved on before it came back. */
+  Schema.Struct({ type: Schema.Literal("announce"), text: Schema.String }),
   Schema.Struct({
     type: Schema.Literal("closed"),
     reason: Schema.optionalKey(Schema.String),
@@ -80,6 +86,8 @@ export const ChatGptVoiceContextRequest = Schema.Struct({
   announce: Schema.optionalKey(Schema.String),
   /** News the app already told the voice agent itself, kept in the call's notes. */
   remember: Schema.optionalKey(Schema.String),
+  /** Something the user typed instead of saying. */
+  say: Schema.optionalKey(Schema.String),
 });
 export type ChatGptVoiceContextRequest = typeof ChatGptVoiceContextRequest.Type;
 

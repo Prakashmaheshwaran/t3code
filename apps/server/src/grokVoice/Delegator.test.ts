@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  HANDOFF_CONTINUED,
-  HANDOFF_HEADER,
-  runDelegation,
-  toFunctionTools,
-  type DelegatorDeps,
-} from "./Delegator.ts";
+import { runDelegation, toFunctionTools, type DelegatorDeps } from "./Delegator.ts";
 
 const call = (name: string, args: Record<string, unknown>, id = name) => ({
   type: "function_call",
@@ -62,50 +56,44 @@ describe("runDelegation", () => {
     await runDelegation(deps, {
       request: "shorten that one",
       transcript: ["User: shorten that one"],
-      explained: [],
       memory: "- Started the README thread.",
     });
     expect(JSON.stringify(inputs[0])).toContain("Started the README thread.");
     expect(String(calls[0]?.args.message)).not.toContain("README thread");
   });
 
-  it("hands threads the user's own words, with the full header only the first time", async () => {
+  it("hands threads the delegator's own prompt, exactly as written", async () => {
+    const prompt = "Fix the typo in README.md: 'recieve' should be 'receive'.";
     const { deps, calls } = scripted([
-      [call("t3_thread_send", { threadId: "t1", message: "Fix the README typo.", mode: "steer" })],
+      [call("t3_thread_send", { threadId: "t1", message: prompt, mode: "steer" })],
       [say("Sent that to the docs thread.")],
     ]);
     const result = await runDelegation(deps, {
       request: "fix the typo",
       transcript: ["User: um fix the uh typo in the readme", "Voice agent: On it."],
       viewed: { threadId: "t1", title: "Docs" },
-      explained: [],
     });
 
-    const message = calls[0]!.args.message as string;
-    expect(message.startsWith(`${HANDOFF_HEADER}\n`)).toBe(true);
-    expect(JSON.parse(message.slice(HANDOFF_HEADER.length + 1))).toEqual({
-      context: 'Thread "Docs", on the user\'s screen.',
-      instruction: "um fix the uh typo in the readme",
-      transcript_delta: ["User: um fix the uh typo in the readme", "Voice agent: On it."],
-      voice: "Fix the README typo.",
-    });
+    expect(calls[0]!.args.message).toBe(prompt);
     expect(result).toEqual({
       speech: "Sent that to the docs thread.",
       sent: [{ threadId: "t1", title: "Docs", instruction: "um fix the uh typo in the readme" }],
-      explained: ["t1"],
     });
+  });
 
-    const again = scripted([
-      [call("t3_thread_send", { threadId: "t1", message: "Also the badge." })],
-    ]);
-    await runDelegation(again.deps, {
-      request: "also the badge",
-      transcript: ["User: also the badge"],
-      explained: result.explained,
-    });
-    expect((again.calls[0]!.args.message as string).startsWith(`${HANDOFF_CONTINUED}\n`)).toBe(
-      true,
-    );
+  it("asks for English prompts and replies in the chosen language", async () => {
+    const { deps } = scripted([[say("Done.")]]);
+    const seen: string[] = [];
+    const respond = deps.respond;
+    deps.respond = async (body) => {
+      seen.push(body.instructions);
+      return respond(body);
+    };
+    await runDelegation(deps, { request: "status", transcript: [], replyLanguage: "English" });
+    await runDelegation(deps, { request: "status", transcript: [] });
+    expect(seen[0]).toContain("self-contained prompt in English");
+    expect(seen[0]).toContain("Spoken reply language: English.");
+    expect(seen[1]).toContain("Spoken reply language: the language the user spoke");
   });
 
   it("records launched threads, caps waits, and asks the client to open a thread", async () => {
@@ -127,7 +115,6 @@ describe("runDelegation", () => {
     const result = await runDelegation(deps, {
       request: "start dark mode",
       transcript: [],
-      explained: [],
     });
 
     expect(calls.map((entry) => entry.name)).toEqual(["t3_thread_launch", "t3_thread_wait"]);
@@ -146,7 +133,6 @@ describe("runDelegation", () => {
       request: "approve it",
       transcript: ["User: approve it"],
       viewed: { threadId: "t1", title: "Docs" },
-      explained: [],
     });
     expect(calls).toEqual([
       { name: "answer_approval", args: { threadId: "t1", requestId: "r1", decision: "accept" } },
@@ -164,7 +150,7 @@ describe("thread reads", () => {
       [say("Done.")],
     ]);
     deps.tools = [...deps.tools, { name: "t3_thread_read", inputSchema: { type: "object" } }];
-    await runDelegation(deps, { request: "check it", transcript: [], explained: [] });
+    await runDelegation(deps, { request: "check it", transcript: [] });
     expect(calls.map((entry) => entry.args)).toEqual([
       { threadId: "t1", limit: 10, maxCharsPerItem: 800, view: "messages" },
       { threadId: "t1", limit: 8, maxCharsPerItem: 600, view: "messages" },

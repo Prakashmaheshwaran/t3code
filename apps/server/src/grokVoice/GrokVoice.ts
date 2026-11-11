@@ -92,6 +92,8 @@ export class GrokVoice extends Context.Service<
       request: GrokVoiceDelegateRequest,
       respond: DelegatorResponder,
     ) => Effect.Effect<GrokVoiceDelegateResult, GrokVoiceError>;
+    /** One request to the delegator's Grok model on the CLI's login, such as for call notes. */
+    readonly respond: DelegatorResponder;
   }
 >()("t3/grokVoice/GrokVoice") {}
 
@@ -288,6 +290,6 @@ export const layer = Layer.effect(
     const delegate = (request: GrokVoiceDelegateRequest) =>
       login().pipe(Effect.andThen(delegateWith(request, responses)));
 
-    return GrokVoice.of({ session, delegate, delegateWith });
+    return GrokVoice.of({ session, delegate, delegateWith, respond: responses });
   }),
 );

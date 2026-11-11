@@ -45,6 +45,7 @@ import * as SpeechModelStore from "./speech/SpeechModelStore.ts";
 import * as SpeechService from "./speech/SpeechService.ts";
 import * as CloudSpeech from "./speech/CloudSpeech.ts";
 import * as GrokVoice from "./grokVoice/GrokVoice.ts";
+import * as GrokCalls from "./grokVoice/GrokCalls.ts";
 import * as ChatGptVoice from "./chatgptVoice/ChatGptVoice.ts";
 import { speechHttpApiLayer } from "./speech/http.ts";
 import { speechStreamRouteLayer } from "./speech/stream.ts";
@@ -844,6 +845,7 @@ const layerMakeRoutes = Layer.mergeAll(
   ),
   Layer.provide(CloudSpeech.layer.pipe(Layer.provide(SecretResolver.layer))),
   Layer.provide(ChatGptVoice.layer),
+  Layer.provide(GrokCalls.layer),
   Layer.provide(GrokVoice.layer.pipe(Layer.provide(ProcessRunner.layer))),
   Layer.provide(layerServerSettings),
   Layer.provide(PreviewAutomationBroker.layer),

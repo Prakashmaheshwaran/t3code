@@ -24,52 +24,42 @@ import * as NodePath from "node:path";
 
 import * as ServerConfig from "../config.ts";
 import * as GrokVoice from "../grokVoice/GrokVoice.ts";
+import {
+  CallLog,
+  KEEP_LINES,
+  delegationMemory,
+  render,
+  seedItems,
+  spoken,
+  standingInstructions,
+  type Summarize,
+} from "../voiceCalls/memory.ts";
+import {
+  recentNotes,
+  saveCall,
+  savesSettled,
+  trackSave,
+  voiceCallsDir,
+} from "../voiceCalls/store.ts";
 
 const RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_BINARIES = ["codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"];
 // Used when the call doesn't name a model and the account still offers it.
 const PREFERRED_DELEGATOR_MODEL =
-  process.env.T3_CHATGPT_VOICE_DELEGATOR_MODEL?.trim() || "gpt-5.6-luna";
+  process.env.T3_CHATGPT_VOICE_DELEGATOR_MODEL?.trim() || "gpt-6.1-terra";
 const TOKEN_MARGIN_MS = 5 * 60_000;
 const POLL_WAIT_MS = 25_000;
 // A call nobody polls is a call nobody hears; end it rather than burn the voice allowance.
 const ABANDONED_MS = 45_000;
-// Conversation not yet in the notes beyond this folds into them, keeping the newest lines as said.
-const FOLD_AT_CHARS = 6_000;
-const KEEP_LINES = 12;
-const NOTES_MAX_CHARS = 4_000;
-const LINE_MAX_CHARS = 800;
 const FOLD_TIMEOUT_MS = 15_000;
 // A resume answers well inside the app's request timeout; a slow fold leaves more lines verbatim.
 const RESUME_FOLD_WAIT_MS = 4_000;
-// After a failed fold, the next waits this long rather than retrying on every line.
-const FOLD_RETRY_MS = 60_000;
 const RESPONSES_TIMEOUT_MS = 90_000;
 // An old session's thread stays loaded briefly, for transcripts that arrive after the switch.
 const OLD_THREAD_LINGER_MS = 15_000;
 const SAVE_WAIT_MS = 5_000;
-const TRANSCRIPTS_KEPT = 200;
 // A session that drops waits this long for the app to continue the call in a new one.
 const RESUME_GRACE_MS = 60_000;
-const RECENT_CALLS_KEPT = 3;
-const RECENT_CALLS_FRESH_MS = 24 * 60 * 60_000;
-const EARLIER_MAX_CHARS = 3_000;
-const SEED_MAX_BYTES = 24_000;
-const SEED_MAX_ITEMS = 120;
-
-const NOTES_INSTRUCTIONS = `You keep the running notes of a voice call between a user and T3 Code's voice assistant, which hands their requests to coding threads. Update the notes with the new part of the conversation.
-Keep what a later request could refer back to: what the user asked for, what was done and in which thread (by title), decisions, open questions, pending work, and preferences the user stated (such as the language to answer in).
-Drop greetings, filler, and anything later superseded. Plain text, one short line per point, at most 250 words. Reply with the notes only.`;
-
-type Speaker = "User" | "Voice agent" | "T3 Code" | "Update";
-interface Line {
-  readonly at: number;
-  readonly who: Speaker;
-  readonly text: string;
-}
-const render = (line: Line) => `${line.who}: ${line.text}`;
-/** What the voice agent and the user said, as opposed to T3 Code's own records. */
-const spoken = (line: Line) => line.who === "User" || line.who === "Voice agent";
 
 function jwtClaims(token: string): Record<string, unknown> {
   const part = token.split(".")[1];
@@ -96,10 +86,11 @@ export function codexTokenIdentity(token: string) {
 
 type Notification = { method: string; params: Record<string, unknown> };
 
+// Letters and digits in any script, so Tamil or Hindi words still have a key.
 const wordsKey = (text: string) =>
   text
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
 
 /** One `codex app-server` over stdio JSON-RPC. */
@@ -197,7 +188,7 @@ class AppServer {
  * One voice call. It outlives its realtime sessions: each session runs on its own ephemeral
  * Codex thread, and a new one picks up the call's notes and latest lines.
  */
-class Call {
+class Call extends CallLog {
   readonly id = crypto.randomUUID();
   readonly startedAt = Date.now();
   /** The Codex thread of the current realtime session. */
@@ -205,17 +196,14 @@ class Call {
   readonly events: { seq: number; event: ChatGptVoiceEvent }[] = [];
   private seq = 0;
   private waiters = new Set<() => void>();
-  readonly lines: Line[] = [];
   delegatedUpTo = 0;
-  /** A summary of `lines` before `foldedUpTo`. */
-  notes = "";
-  foldedUpTo = 0;
-  folding: Promise<void> | undefined;
-  /** Notes from the user's recent earlier calls. */
-  earlier = "";
-  explained: string[] = [];
   viewed: GrokVoiceViewed | undefined;
   delegatorModel: string | undefined;
+  /** Standing instructions for the voice, such as the language to answer in. */
+  standing: ReadonlyArray<string> = [];
+  replyLanguage: string | undefined;
+  /** Days to keep the saved call; 0 saves nothing. Unset keeps it until pruned. */
+  keepDays: number | undefined;
   lastPoll = Date.now();
   /** The call is over; nothing resumes it. */
   closed = false;
@@ -223,7 +211,6 @@ class Call {
   switching = false;
   /** Earlier sessions' threads, whose last transcripts may still arrive. */
   readonly pastThreads = new Set<string>();
-  foldFailedAt = 0;
   /** Codex's last realtime error, which says why a session closed. */
   lastError = "";
   dropTimer: ReturnType<typeof setTimeout> | undefined;
@@ -231,11 +218,6 @@ class Call {
   readonly handled = new Set<string>();
   /** Handoffs carry the user's words before Live's final transcript of them arrives. */
   readonly delegatedWords = new Set<string>();
-
-  add(who: Speaker, text: string) {
-    const trimmed = text.trim();
-    if (trimmed) this.lines.push({ at: Date.now(), who, text: trimmed.slice(0, LINE_MAX_CHARS) });
-  }
 
   push(event: ChatGptVoiceEvent) {
     this.events.push({ seq: ++this.seq, event });
@@ -265,105 +247,6 @@ class Call {
       this.waiters.add(done);
     });
   }
-}
-
-interface CallMemory {
-  readonly lines: ReadonlyArray<Line>;
-  readonly notes: string;
-  readonly foldedUpTo: number;
-  readonly earlier: string;
-}
-
-/** Where to fold the notes up to now, or null while the unsummarized part is still short. */
-export function nextFold(memory: Pick<CallMemory, "lines" | "foldedUpTo">) {
-  const upTo = memory.lines.length - KEEP_LINES;
-  if (upTo <= memory.foldedUpTo) return null;
-  let chars = 0;
-  for (const line of memory.lines.slice(memory.foldedUpTo, upTo)) chars += line.text.length + 14;
-  return chars >= FOLD_AT_CHARS ? upTo : null;
-}
-
-/**
- * What a delegation may need from before its own transcript delta: recent calls, this call's
- * notes, and the lines since the notes, verbatim.
- */
-export function delegationMemory(memory: CallMemory, deltaStart: number) {
-  const since = memory.lines
-    .slice(memory.foldedUpTo, deltaStart)
-    .slice(-30)
-    .map(render)
-    .join("\n")
-    .slice(-4_000);
-  const parts = [
-    memory.earlier && `Recent earlier calls (may be out of date):\n${memory.earlier}`,
-    memory.notes && `This call so far:\n${memory.notes}`,
-    since && `Then, word for word:\n${since}`,
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join("\n\n") : undefined;
-}
-
-/** History a realtime session starts with, so it knows the call it joins. */
-export function seedItems(memory: CallMemory, resumed: boolean) {
-  const context = [
-    resumed &&
-      "This call continues from an earlier realtime session, which was refreshed to keep the call going. Carry on naturally and don't mention the refresh unless asked.",
-    memory.earlier &&
-      `Notes from the user's recent earlier calls, which may be out of date:\n${memory.earlier}`,
-    memory.notes && `Notes on this call so far:\n${memory.notes}`,
-  ].filter(Boolean);
-  const items: { role: "developer" | "user" | "assistant"; text: string }[] = [];
-  const header = context.join("\n\n");
-  if (header) items.push({ role: "developer", text: header });
-  if (!resumed) return items;
-  // Codex refuses more than 128 items, or about 8k tokens, which it estimates from bytes.
-  let budget = SEED_MAX_BYTES - Buffer.byteLength(header);
-  const recent: typeof items = [];
-  for (const line of memory.lines.slice(memory.foldedUpTo).toReversed()) {
-    budget -= Buffer.byteLength(line.text) + 16;
-    if (budget < 0 || items.length + recent.length >= SEED_MAX_ITEMS) break;
-    recent.unshift(
-      line.who === "User"
-        ? { role: "user", text: line.text }
-        : line.who === "Voice agent"
-          ? { role: "assistant", text: line.text }
-          : { role: "developer", text: render(line) },
-    );
-  }
-  return [...items, ...recent];
-}
-
-/** The notes of calls that ended within the last day, newest last. */
-export function recentCallNotes(
-  calls: ReadonlyArray<{ endedAt: number; notes: string }>,
-  now: number,
-) {
-  return calls
-    .filter((call) => now - call.endedAt < RECENT_CALLS_FRESH_MS && call.notes.trim())
-    .map((call) => `Call that ended ${new Date(call.endedAt).toLocaleString()}:\n${call.notes}`)
-    .join("\n\n")
-    .slice(-EARLIER_MAX_CHARS);
-}
-
-/** A call as a readable file: its notes, then everything said. */
-export function callTranscript(
-  call: Pick<CallMemory, "lines" | "notes"> & { startedAt: number },
-  endedAt: number,
-) {
-  const time = (at: number) => new Date(at).toLocaleTimeString();
-  return [
-    `# Voice call, ${new Date(call.startedAt).toLocaleString()}`,
-    "",
-    `Ended ${new Date(endedAt).toLocaleString()}.`,
-    "",
-    "## Notes",
-    "",
-    call.notes || "(none)",
-    "",
-    "## Transcript",
-    "",
-    ...call.lines.map((line) => `[${time(line.at)}] ${render(line)}`),
-    "",
-  ].join("\n");
 }
 
 export class ChatGptVoice extends Context.Service<
@@ -408,9 +291,7 @@ export const layer = Layer.effect(
     const calls = new Map<string, Call>();
     const stateDir = NodePath.dirname(config.serverRuntimeStatePath);
     const workDir = NodePath.join(stateDir, "voice-codex");
-    // Every call's notes and transcript, and the notes the next call starts with.
-    const callsDir = NodePath.join(stateDir, "voice-calls");
-    const recentCallsPath = NodePath.join(callsDir, "recent.json");
+    const callsDir = voiceCallsDir(stateDir);
     let server: Promise<AppServer> | undefined;
     let token: { value: string; accountId: string; expiresAt: number } | undefined;
 
@@ -572,87 +453,38 @@ export const layer = Layer.effect(
         .join("")
         .trim();
 
-    /** Summarizes the lines before `upTo` into the call's notes, one fold at a time. */
-    const fold = (call: Call, upTo: number) => {
-      const run = (call.folding ?? Promise.resolve())
-        .then(async () => {
-          const part = call.lines.slice(call.foldedUpTo, upTo);
-          if (part.length === 0) return;
-          const notes = outputText(
-            await runPromise(
-              responder(call)({
-                instructions: NOTES_INSTRUCTIONS,
-                input: [
-                  {
-                    role: "user",
-                    content: `Notes so far:\n${call.notes || "(none)"}\n\nNew conversation:\n${part.map(render).join("\n")}`,
-                  },
-                ],
-                tools: [],
-              }),
-            ),
-          );
-          if (!notes) throw new Error("No notes came back.");
-          call.notes = notes.slice(0, NOTES_MAX_CHARS);
-          call.foldedUpTo = Math.max(call.foldedUpTo, upTo);
-        })
-        .catch(() => {
-          call.foldFailedAt = Date.now();
-        })
-        .finally(() => {
-          if (call.folding === run) call.folding = undefined;
-        });
-      call.folding = run;
-      return run;
-    };
-
-    /** Folds once the unsummarized conversation grows long; never in the way of the call. */
-    const foldIfLong = (call: Call) => {
-      if (call.folding || Date.now() - call.foldFailedAt < FOLD_RETRY_MS) return;
-      const upTo = nextFold(call);
-      if (upTo !== null) void fold(call, upTo);
-    };
+    /** Notes come from the call's own thinking model, without tools. */
+    const summarizer =
+      (call: Call): Summarize =>
+      async ({ instructions, input }) =>
+        outputText(
+          await runPromise(
+            responder(call)({ instructions, input: [{ role: "user", content: input }], tools: [] }),
+          ),
+        );
+    const fold = (call: Call, upTo: number) => call.fold(upTo, summarizer(call));
+    const foldIfLong = (call: Call) => call.foldIfLong(summarizer(call));
 
     const within = (work: Promise<unknown>, ms: number) =>
       Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms))]);
 
-    const readRecentCalls = (): { endedAt: number; notes: string }[] => {
-      try {
-        const parsed = JSON.parse(NodeFS.readFileSync(recentCallsPath, "utf8")) as unknown;
-        return Array.isArray(parsed)
-          ? parsed.filter(
-              (entry): entry is { endedAt: number; notes: string } =>
-                typeof entry?.endedAt === "number" && typeof entry?.notes === "string",
-            )
-          : [];
-      } catch {
-        return [];
-      }
-    };
-
-    /** Writes the call's transcript, and keeps its notes for the next calls. */
+    /** Saves the call with its final notes, for the history and the next calls. */
     const save = async (call: Call) => {
-      if (call.lines.length === 0) return;
+      if (call.lines.length === 0 || call.keepDays === 0) return;
       await within(fold(call, call.lines.length), FOLD_TIMEOUT_MS);
-      const endedAt = Date.now();
       try {
-        NodeFS.mkdirSync(callsDir, { recursive: true });
-        const stamp = new Date(call.startedAt).toISOString().replace(/[:.]/g, "-");
-        NodeFS.writeFileSync(
-          NodePath.join(callsDir, `${stamp}-${call.id.slice(0, 8)}.md`),
-          callTranscript(call, endedAt),
+        saveCall(
+          callsDir,
+          {
+            id: call.id,
+            provider: "chatgpt",
+            startedAt: call.startedAt,
+            endedAt: Date.now(),
+            notes: call.notes,
+            lines: call.lines,
+          },
+          call.keepDays,
         );
-        // Names start with the time, so the oldest sort first.
-        const transcripts = NodeFS.readdirSync(callsDir).filter((name) => name.endsWith(".md"));
-        for (const name of transcripts.toSorted().slice(0, -TRANSCRIPTS_KEPT))
-          NodeFS.rmSync(NodePath.join(callsDir, name), { force: true });
-        if (call.notes)
-          NodeFS.writeFileSync(
-            recentCallsPath,
-            JSON.stringify(
-              [...readRecentCalls(), { endedAt, notes: call.notes }].slice(-RECENT_CALLS_KEPT),
-            ),
-          );
       } catch {}
     };
 
@@ -678,9 +510,6 @@ export const layer = Layer.effect(
       await stopSession(threadId);
     };
 
-    // Saves still writing, so a call placed right after a hang-up starts with its notes.
-    const saving = new Set<Promise<void>>();
-
     /** Ends the call for good: hung up, abandoned, or not resumed after a drop. */
     const close = (call: Call, reason?: string) => {
       if (call.closed) return;
@@ -689,13 +518,8 @@ export const layer = Layer.effect(
       clearTimeout(call.dropTimer);
       void retire(call, call.threadId);
       call.push({ type: "closed", ...(reason ? { reason } : {}) });
-      const saved = save(call);
-      saving.add(saved);
-      void saved.finally(() => {
-        saving.delete(saved);
-        // Keep the final events readable briefly, then forget the call.
-        setTimeout(() => calls.delete(call.id), 60_000);
-      });
+      // Keep the final events readable briefly, then forget the call.
+      void trackSave(save(call)).finally(() => setTimeout(() => calls.delete(call.id), 60_000));
     };
 
     /** The realtime session ended on its own; the app gets a moment to continue the call. */
@@ -713,8 +537,18 @@ export const layer = Layer.effect(
       call.push({ type: "closed", resumable: true, ...(reason ? { reason } : {}) });
     };
 
-    const delegate = (call: Call, id: string, prompt: string) => {
-      if (call.handled.has(id)) return;
+    /** Whether the session that asked is still the live one, so its handoff can answer. */
+    const canSpeakIn = (call: Call, askedBy: string) =>
+      askedBy === call.threadId && !call.switching && call.dropTimer === undefined;
+
+    const answerNews = (askedBy: string, prompt: string, answer: string) =>
+      askedBy === "typed"
+        ? `The user typed this request instead of saying it: ${JSON.stringify(prompt)}. It's done; tell them the outcome in your own words: ${answer}`
+        : `The answer to the user's earlier request ${JSON.stringify(prompt)} came back; tell them: ${answer}`;
+
+    const delegate = (call: Call, id: string, prompt: string, askedBy: string) => {
+      // A handoff from a session retired at hang-up must not start work after the call.
+      if (call.closed || call.handled.has(id)) return;
       call.handled.add(id);
       call.push({ type: "delegating", id });
       const deltaStart = call.delegatedUpTo;
@@ -726,28 +560,34 @@ export const layer = Layer.effect(
       // Live's own transcript of these words arrives later and is dropped, so they're kept here.
       call.add("User", prompt);
       call.delegatedUpTo = call.lines.length;
-      call.delegatedWords.add(wordsKey(prompt));
+      // Typed words never come back as a transcript, so only spoken ones are expected late.
+      const key = wordsKey(prompt);
+      if (askedBy !== "typed" && key) call.delegatedWords.add(key);
       void runPromise(
         grok.delegateWith(
           {
             request: prompt,
             transcript,
             ...(call.viewed ? { viewed: call.viewed } : {}),
-            explained: call.explained,
             ...(memory ? { memory } : {}),
+            ...(call.replyLanguage ? { replyLanguage: call.replyLanguage } : {}),
           },
           responder(call),
         ),
       ).then(
         (result) => {
-          call.explained = [...result.explained];
-          const where = result.sent.map((sent) => JSON.stringify(sent.title || sent.threadId));
+          const where = result.sent.flatMap((sent) =>
+            sent.title ? [JSON.stringify(sent.title)] : [],
+          );
           call.add(
             "T3 Code",
             `${result.speech}${where.length ? ` (sent to ${where.join(", ")})` : ""}`,
           );
           foldIfLong(call);
-          speak(call, result.speech);
+          // Live speaks an answer only inside the handoff that asked; otherwise it's news, with
+          // enough context that the voice tells it rather than acting on it.
+          if (canSpeakIn(call, askedBy)) speak(call, result.speech);
+          else call.push({ type: "announce", text: answerNews(askedBy, prompt, result.speech) });
           call.push({
             type: "delegated",
             id,
@@ -759,7 +599,12 @@ export const layer = Layer.effect(
         (error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);
           call.add("T3 Code", `Failed: ${message}`);
-          speak(call, `That failed: ${message}`);
+          if (canSpeakIn(call, askedBy)) speak(call, `That failed: ${message}`);
+          else
+            call.push({
+              type: "announce",
+              text: answerNews(askedBy, prompt, `It failed: ${message}`),
+            });
           call.push({ type: "note", text: `Delegation failed: ${message}` });
           call.push({ type: "delegated", id, speech: "", sent: [] });
         },
@@ -796,7 +641,7 @@ export const layer = Layer.effect(
           if (item?.type !== "handoff_request") return;
           const id = String(item.handoff_id ?? item.item_id ?? "");
           const prompt = typeof item.input_transcript === "string" ? item.input_transcript : "";
-          if (id) delegate(call, id, prompt.trim());
+          if (id) delegate(call, id, prompt.trim(), threadId);
           return;
         }
         case "thread/realtime/transcript/done":
@@ -818,6 +663,8 @@ export const layer = Layer.effect(
     const onPastSessionEvent = (call: Call, { method, params }: Notification, threadId: string) => {
       if (method === "turn/started") interruptCodexTurn(threadId, params);
       else if (method === "thread/realtime/transcript/done") heardTranscript(call, params);
+      else if (method === "thread/realtime/itemAdded")
+        onCallEvent(call, { method, params }, threadId);
     };
 
     const sdpAnswer = (running: AppServer, threadId: string) =>
@@ -877,7 +724,7 @@ export const layer = Layer.effect(
         }
       };
       // Codex measures the seed itself. If it refuses, the notes alone, then nothing, beat no call.
-      const seed = seedItems(call, resumed);
+      const seed = seedItems(call, resumed, call.standing);
       const fallbacks = [seed, seed.slice(0, 1), []].filter(
         (items, index, all) => index === 0 || items.length < all[index - 1]!.length,
       );
@@ -895,12 +742,19 @@ export const layer = Layer.effect(
     };
 
     /** Moves a call onto a new realtime session: before a long one runs out, or after a drop. */
+    /**
+     * Moves a call onto a new realtime session: before a long one runs out, or after a drop. The
+     * old session keeps talking until the new one answers, and stays if a planned move fails.
+     */
     const resume = async (callId: string, request: ChatGptVoiceStartRequest) => {
       const call = calls.get(callId);
       if (!call || call.closed) throw failure("no-call");
+      const dropped = call.dropTimer !== undefined;
       // From here the call either moves or closes; the drop timer must not end it midway.
       clearTimeout(call.dropTimer);
       call.switching = true;
+      const previous = call.threadId;
+      let opened = false;
       try {
         // Folded while the old session still talks; lines a slow fold misses are seeded verbatim.
         await within(
@@ -908,18 +762,27 @@ export const layer = Layer.effect(
           RESUME_FOLD_WAIT_MS,
         );
         if (call.closed) throw failure("no-call");
-        await retire(call, call.threadId);
         if (request.viewed) call.viewed = request.viewed;
+        // The old session's last transcripts and handoffs still count while the new one starts.
+        call.pastThreads.add(previous);
         const sdp = await openSession(call, request.sdp, request.voice, true);
+        opened = true;
+        void retire(call, previous);
         // Hung up while the new session was starting: nothing may keep it running.
         if (call.closed) {
           void retire(call, call.threadId);
           throw failure("no-call");
         }
         call.lastError = "";
+        call.dropTimer = undefined;
         return { callId: call.id, sdp };
       } catch (error) {
-        close(call, "Couldn't continue the call.");
+        if (!dropped && !opened && !call.closed) {
+          // A planned move that failed leaves the call on the session it already had.
+          if (call.threadId && call.threadId !== previous) void stopSession(call.threadId);
+          call.threadId = previous;
+          call.pastThreads.delete(previous);
+        } else close(call, "Couldn't continue the call.");
         throw error;
       } finally {
         call.switching = false;
@@ -932,8 +795,11 @@ export const layer = Layer.effect(
         const call = new Call();
         call.viewed = request.viewed;
         call.delegatorModel = request.delegatorModel;
-        await within(Promise.all(saving), SAVE_WAIT_MS);
-        call.earlier = recentCallNotes(readRecentCalls(), Date.now());
+        call.keepDays = request.keepDays;
+        call.replyLanguage = request.replyLanguage;
+        call.standing = standingInstructions(request.replyLanguage);
+        await savesSettled(SAVE_WAIT_MS);
+        if (request.keepDays !== 0) call.earlier = recentNotes(callsDir, Date.now());
         calls.set(call.id, call);
         try {
           const sdp = await openSession(call, request.sdp, request.voice, false);
@@ -977,6 +843,10 @@ export const layer = Layer.effect(
         foldIfLong(call);
       }
       if (request.announce) speak(call, request.announce);
+      // GPT-Live answers typed text itself instead of handing it off, so it goes straight to
+      // the delegator, and the voice tells the outcome like other news.
+      const typed = request.say?.trim();
+      if (typed) delegate(call, `typed-${crypto.randomUUID()}`, typed, "typed");
     });
 
     const end = (callId: string) =>

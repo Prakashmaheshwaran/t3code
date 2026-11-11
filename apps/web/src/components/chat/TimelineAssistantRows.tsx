@@ -219,7 +219,7 @@ function RunSpeedMeta({ runId }: { runId: RunId }) {
         Time to first token: {formatTtft(speed.ttftMs)}, from the provider getting the request to
         its first output.
         {speed.outputTokens !== null && speed.tokensPerSecond !== null
-          ? ` ${speed.outputTokens.toLocaleString()} output tokens, averaged from the first output to the end of the turn, tool time included.`
+          ? ` ${speed.outputTokens.toLocaleString()} output tokens, averaged over the time the model was writing, without the time tools ran or it waited for you.`
           : ""}
       </TooltipPopup>
     </Tooltip>

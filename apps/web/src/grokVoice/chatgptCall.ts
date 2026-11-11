@@ -70,7 +70,7 @@ export class ChatGptCall {
   private sentEvents = 0;
   private muted = false;
   private input:
-    | { voice: ChatGptVoiceStartRequest["voice"]; delegatorModel?: string | undefined }
+    | Pick<ChatGptVoiceStartRequest, "voice" | "delegatorModel" | "replyLanguage" | "keepDays">
     | undefined;
   private viewed: GrokVoiceViewed | undefined;
   private sessionStartedAt = 0;
@@ -87,8 +87,15 @@ export class ChatGptCall {
     voice: ChatGptVoiceStartRequest["voice"];
     viewed?: GrokVoiceViewed;
     delegatorModel?: string | undefined;
+    replyLanguage?: string | undefined;
+    keepDays?: number | undefined;
   }) {
-    this.input = { voice: input.voice, delegatorModel: input.delegatorModel };
+    this.input = {
+      voice: input.voice,
+      ...(input.delegatorModel ? { delegatorModel: input.delegatorModel } : {}),
+      ...(input.replyLanguage ? { replyLanguage: input.replyLanguage } : {}),
+      ...(input.keepDays !== undefined ? { keepDays: input.keepDays } : {}),
+    };
     this.viewed = input.viewed;
     try {
       this.stream = await openCallMicrophone();
@@ -160,6 +167,8 @@ export class ChatGptCall {
       return true;
     } catch (error) {
       if (session && this.peer !== session.peer) session.peer.close();
+      // A planned refresh that failed leaves the call on the session it already had.
+      if (dropped === undefined && !this.stopped) return false;
       this.stop(serverReason(error) ?? dropped ?? "Couldn't refresh the call.");
       return false;
     } finally {
@@ -169,9 +178,9 @@ export class ChatGptCall {
 
   private request(sdp: string): ChatGptVoiceStartRequest {
     return {
+      voice: "cove",
+      ...this.input,
       sdp,
-      voice: this.input?.voice ?? "cove",
-      ...(this.input?.delegatorModel ? { delegatorModel: this.input.delegatorModel } : {}),
       ...(this.viewed ? { viewed: this.viewed } : {}),
     };
   }
@@ -247,7 +256,7 @@ export class ChatGptCall {
    * the call's own channel: Codex's appendSpeech is only spoken inside a pending handoff, and
    * once any handoff happened GPT-Live ignores session context, so news joins the last one.
    */
-  announce(text: string) {
+  announce(text: string, record = true) {
     if (this.channel?.readyState === "open") {
       for (const part of speakableChunks(text))
         this.sendLive(
@@ -259,13 +268,14 @@ export class ChatGptCall {
                 content: [{ type: "input_text", text: part }],
               }
             : {
+                // The channel Codex's own appendSpeech uses for words the voice should say.
                 type: "session.context.append",
-                channel: "commentary",
+                channel: "speakable",
                 content: [{ type: "input_text", text: part }],
               },
         );
       // The server never saw this, and it belongs in the call's notes.
-      if (this.callId)
+      if (record && this.callId)
         void runEnvironmentSpeech(
           chatGptVoiceContext(this.prepared, this.callId, { remember: text }),
         ).catch(() => {});
@@ -280,6 +290,14 @@ export class ChatGptCall {
   private sendLive(event: Record<string, unknown>) {
     if (this.channel?.readyState === "open")
       this.channel.send(JSON.stringify({ event_id: `t3_${++this.sentEvents}`, ...event }));
+  }
+
+  /** Typed input, for when speaking isn't an option. */
+  say(text: string) {
+    if (!this.callId) return;
+    void runEnvironmentSpeech(chatGptVoiceContext(this.prepared, this.callId, { say: text })).catch(
+      () => this.callbacks.onEvent({ type: "note", text: "Couldn't send that to the call." }),
+    );
   }
 
   updateViewed(viewed: GrokVoiceViewed | undefined) {
