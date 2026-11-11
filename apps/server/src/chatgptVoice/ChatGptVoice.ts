@@ -190,7 +190,6 @@ class Call extends CallLog {
   private seq = 0;
   private waiters = new Set<() => void>();
   delegatedUpTo = 0;
-  explained: string[] = [];
   viewed: GrokVoiceViewed | undefined;
   delegatorModel: string | undefined;
   /** Standing instructions for the voice, such as the language to answer in. */
@@ -559,7 +558,6 @@ export const layer = Layer.effect(
             request: prompt,
             transcript,
             ...(call.viewed ? { viewed: call.viewed } : {}),
-            explained: call.explained,
             ...(memory ? { memory } : {}),
             ...(call.replyLanguage ? { replyLanguage: call.replyLanguage } : {}),
           },
@@ -567,7 +565,6 @@ export const layer = Layer.effect(
         ),
       ).then(
         (result) => {
-          call.explained = [...result.explained];
           const where = result.sent.map((sent) => JSON.stringify(sent.title || sent.threadId));
           call.add(
             "T3 Code",

@@ -1,11 +1,16 @@
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveRunSpeeds, formatTokensPerSecond, formatTtft } from "./runSpeed";
+import { coveredMs, deriveRunSpeeds, formatTokensPerSecond, formatTtft } from "./runSpeed";
 
 const at = (ms: number) => DateTime.makeUnsafe(ms);
 
-function fixture(input: { outputTokens?: number; itemStart?: number; status?: string }) {
+function fixture(input: {
+  outputTokens?: number;
+  itemStart?: number;
+  status?: string;
+  tools?: ReadonlyArray<readonly [number, number | null]>;
+}) {
   return {
     runs: [
       {
@@ -44,6 +49,12 @@ function fixture(input: { outputTokens?: number; itemStart?: number; status?: st
         startedAt: at(input.itemStart ?? 1100),
       },
       { type: "reasoning", providerTurnId: "turn-1", startedAt: at(2000) },
+      ...(input.tools ?? []).map(([start, end]) => ({
+        type: "command_execution",
+        providerTurnId: "turn-1",
+        startedAt: at(start),
+        completedAt: end === null ? null : at(end),
+      })),
     ],
   } as unknown as Parameters<typeof deriveRunSpeeds>[0];
 }
@@ -55,6 +66,20 @@ describe("deriveRunSpeeds", () => {
     expect(speed?.tokensPerSecond).toBe(100);
   });
 
+  it("leaves out the time tools ran, counting overlapping tools once", () => {
+    // 4 s from first output to the end, 2 s of it running two overlapping commands.
+    const speed = deriveRunSpeeds(
+      fixture({
+        outputTokens: 400,
+        tools: [
+          [2000, 3500],
+          [3000, 4000],
+        ],
+      }),
+    ).get("run-1" as never);
+    expect(speed?.tokensPerSecond).toBe(200);
+  });
+
   it("leaves the rate out without a token count", () => {
     const speed = deriveRunSpeeds(fixture({})).get("run-1" as never);
     expect(speed?.ttftMs).toBe(1000);
@@ -63,6 +88,24 @@ describe("deriveRunSpeeds", () => {
 
   it("skips runs that are not finished", () => {
     expect(deriveRunSpeeds(fixture({ status: "running" })).size).toBe(0);
+  });
+});
+
+describe("coveredMs", () => {
+  it("merges overlaps and clips spans to the window", () => {
+    expect(
+      coveredMs(
+        [
+          [0, 10],
+          [5, 20],
+          [30, 40],
+          [90, 200],
+        ],
+        2,
+        100,
+      ),
+    ).toBe(18 + 10 + 10);
+    expect(coveredMs([[50, Number.POSITIVE_INFINITY]], 0, 100)).toBe(50);
   });
 });
 

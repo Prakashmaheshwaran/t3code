@@ -409,7 +409,6 @@ async function startGrokVoiceCall() {
     addLine({ who: "you", text });
   };
   let delegatedUpTo = 0;
-  let explained: string[] = [];
   const takeDelta = () => {
     const delta = log.slice(Math.max(delegatedUpTo, log.length - MAX_DELTA_LINES));
     delegatedUpTo = log.length;
@@ -554,12 +553,10 @@ async function startGrokVoiceCall() {
           request,
           transcript: takeDelta(),
           ...(current ? { viewed: current } : {}),
-          explained,
         }),
       )
         .then(
           (result) => {
-            explained = [...result.explained];
             delegated(result);
             if (import.meta.env.DEV) console.info("[grok-voice] delegation", result);
             if (!ended) call.sendToolOutput(callId, { speech: result.speech });
