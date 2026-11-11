@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off - small synchronous files beside the server's state, read and written by the voice calls.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - small synchronous files beside the server's state, read and written by the voice calls.
 
 // Finished voice calls, one JSON file each in `<state>/voice-calls/`: the call's notes and
 // everything said. The newest calls' notes are what the next call starts with.
@@ -41,11 +41,14 @@ const validId = (id: string) => /^[A-Za-z0-9-]{8,64}$/.test(id);
 const fileName = (call: Pick<SavedCall, "id" | "startedAt">) =>
   `${new Date(call.startedAt).toISOString().replace(/[:.]/g, "-")}-${call.id}.json`;
 
+// `<start time>-<id>.json`, as `fileName` writes them; anything else in the folder isn't a call.
+const CALL_FILE = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-[A-Za-z0-9-]{8,64}\.json$/;
+
 /** Saved calls' file names, oldest first: names start with the time. */
 const callFiles = (dir: string) => {
   try {
     return NodeFS.readdirSync(dir)
-      .filter((name) => name.endsWith(".json"))
+      .filter((name) => CALL_FILE.test(name))
       .toSorted();
   } catch {
     return [];
@@ -137,6 +140,20 @@ export function recentCallNotes(
     .join("\n\n")
     .slice(-EARLIER_MAX_CHARS);
 }
+
+// Saves still writing, so a call placed right after a hang-up starts with that call's notes.
+const saving = new Set<Promise<unknown>>();
+
+/** Runs a save so `savesSettled` can wait for it. */
+export function trackSave(save: Promise<unknown>) {
+  saving.add(save);
+  void save.finally(() => saving.delete(save));
+  return save;
+}
+
+/** Resolves once saves in progress finish, or after `ms`. */
+export const savesSettled = (ms: number) =>
+  Promise.race([Promise.allSettled(saving), new Promise((resolve) => setTimeout(resolve, ms))]);
 
 /** What a new call starts knowing about the user's recent calls. */
 export function recentNotes(dir: string, now: number) {

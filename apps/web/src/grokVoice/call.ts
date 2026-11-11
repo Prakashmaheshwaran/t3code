@@ -78,6 +78,7 @@ const REFRESH_AFTER_MS = 20 * 60_000;
 const REFRESH_QUIET_MS = 4000;
 // Reconnecting again sooner than this means sessions keep failing, so the call ends instead.
 const MIN_RESUME_GAP_MS = 60_000;
+const RETRY_REFRESH_MS = 5 * 60_000;
 
 export interface CallLine {
   readonly id: number;
@@ -190,7 +191,8 @@ const addLine = (line: Omit<CallLine, "id">) =>
 let router: AnyRouter | null = null;
 interface VoiceCall {
   readonly say?: (text: string) => void;
-  readonly announce: (text: string) => void;
+  /** `record` false for news the server already has, such as its own answers. */
+  readonly announce: (text: string, record?: boolean) => void;
   readonly setMuted: (muted: boolean) => void;
   readonly stop: () => void;
   readonly microphone: MediaStream | undefined;
@@ -294,6 +296,8 @@ export function sendGrokVoiceText(text: string) {
   const trimmed = text.trim();
   if (!trimmed || !active?.call.say) return;
   active.heardUser(trimmed);
+  // Typed "mute" mutes too, rather than going to the voice.
+  if (isMuteCommand(trimmed)) return setCallMuted(true, true);
   active.call.say(trimmed);
 }
 
@@ -431,7 +435,7 @@ async function startGrokVoiceCall() {
   let announcer: VoiceCall | null = null;
   // News waits until nobody is talking and no delegation is running, as OpenCode's reply gate
   // does, but never longer than DELEGATION_HOLD_MS behind a delegation that never reports back.
-  const news: string[] = [];
+  const news: { text: string; record: boolean }[] = [];
   let newsSince = 0;
   let lastBusyAt = 0;
   let recheck: ReturnType<typeof setTimeout> | undefined;
@@ -455,7 +459,7 @@ async function startGrokVoiceCall() {
       return;
     }
     newsSince = 0;
-    for (const detail of news.splice(0)) announcer.announce(detail);
+    for (const item of news.splice(0)) announcer.announce(item.text, item.record);
   };
   const quietFor = () => {
     noteBusy();
@@ -472,7 +476,7 @@ async function startGrokVoiceCall() {
   const watcher = watchThreads((note, detail) => {
     if (ended) return;
     addLine({ who: "note", text: note });
-    news.push(detail);
+    news.push({ text: detail, record: true });
     flushNews();
   });
 
@@ -520,7 +524,7 @@ async function startGrokVoiceCall() {
           return addLine({ who: "note", text: event.text });
         case "announce":
           // Waits for quiet like thread news, then goes to the session that's live now.
-          news.push(event.text);
+          news.push({ text: event.text, record: false });
           return flushNews();
       }
     };
@@ -538,9 +542,11 @@ async function startGrokVoiceCall() {
     });
     announcer = call;
     const stopFollowing = appRouter.subscribe("onResolved", () => call.updateViewed(viewed()));
+    // A planned refresh that failed waits a while; the session it meant to replace still works.
+    let refreshAfter = 0;
     const refresher = setInterval(() => {
       const state = useGrokVoiceStore.getState();
-      if (state.status !== "live" || call.switchingSessions) return;
+      if (state.status !== "live" || call.switchingSessions || Date.now() < refreshAfter) return;
       if (call.sessionAge < REFRESH_AFTER_MS) return;
       if (news.length > 0 || state.delegating > 0 || quietFor() < REFRESH_QUIET_MS) return;
       addLine({
@@ -548,7 +554,10 @@ async function startGrokVoiceCall() {
         text: "Refreshing the call so it keeps up with a long conversation…",
       });
       void call.refresh().then((refreshed) => {
-        if (refreshed) addLine({ who: "note", text: "Refreshed, with this call's notes." });
+        if (refreshed) return addLine({ who: "note", text: "Refreshed, with this call's notes." });
+        if (ended) return;
+        refreshAfter = Date.now() + RETRY_REFRESH_MS;
+        addLine({ who: "note", text: "Couldn't refresh the call; it carries on as it is." });
       });
     }, 5000);
     const dispose = () => {
@@ -598,6 +607,8 @@ async function startGrokVoiceCall() {
   };
   let switching = false;
   let lastResumeAt = 0;
+  // A planned refresh that failed waits a while; the session it meant to replace still works.
+  let refreshAfter = 0;
   /** Moves the call to a fresh Grok session that starts from the server's notes. */
   const refreshGrok = async (dropped?: string) => {
     if (switching || ended || !callId) return false;
@@ -608,8 +619,14 @@ async function startGrokVoiceCall() {
       await call.reconnect(next.session, next.seed);
       return true;
     } catch (error) {
+      if (dropped === undefined) {
+        refreshAfter = Date.now() + RETRY_REFRESH_MS;
+        addLine({ who: "note", text: "Couldn't refresh the call; it carries on as it is." });
+        return false;
+      }
       dispose();
-      set({ error: dropped ?? errorMessage(error) });
+      set({ error: dropped });
+      if (import.meta.env.DEV) console.warn("[grok-voice] reconnect failed", errorMessage(error));
       return false;
     } finally {
       switching = false;
@@ -663,6 +680,7 @@ async function startGrokVoiceCall() {
           : "";
       set((state) => ({ delegating: state.delegating + 1 }));
       const current = viewed();
+      const askedIn = call.session;
       // The server reads this request's lines from the call, so they land first.
       void posting
         .then(() =>
@@ -680,21 +698,39 @@ async function startGrokVoiceCall() {
           (result) => {
             delegated(result);
             if (import.meta.env.DEV) console.info("[grok-voice] delegation", result);
-            if (!ended) call.sendToolOutput(toolCallId, { speech: result.speech });
+            answer(askedIn, toolCallId, request, { speech: result.speech }, result.speech);
           },
           (error: unknown) => {
             const message = errorMessage(error);
             addLine({ who: "note", text: `Delegation failed: ${message}` });
-            if (!ended) call.sendToolOutput(toolCallId, { error: message });
+            answer(askedIn, toolCallId, request, { error: message }, `It failed: ${message}`);
           },
         )
         .finally(() => set((state) => ({ delegating: Math.max(0, state.delegating - 1) })));
     },
   });
 
+  /** A tool result goes to the session that asked; after a switch, it's news for the new one. */
+  const answer = (
+    askedIn: number,
+    toolCallId: string,
+    request: string,
+    output: unknown,
+    spoken: string,
+  ) => {
+    if (ended) return;
+    if (call.session === askedIn) return call.sendToolOutput(toolCallId, output);
+    news.push({
+      text: `The answer to the user's earlier request ${JSON.stringify(request)} came back: ${spoken}`,
+      record: false,
+    });
+    flushNews();
+  };
+
   const refresher = setInterval(() => {
     const state = useGrokVoiceStore.getState();
-    if (state.status !== "live" || switching || call.sessionAge < REFRESH_AFTER_MS) return;
+    if (state.status !== "live" || switching || call.busy || Date.now() < refreshAfter) return;
+    if (call.sessionAge < REFRESH_AFTER_MS) return;
     if (news.length > 0 || state.delegating > 0 || quietFor() < REFRESH_QUIET_MS) return;
     addLine({ who: "note", text: "Refreshing the call so it keeps up with a long conversation…" });
     void refreshGrok().then((refreshed) => {
@@ -722,9 +758,9 @@ async function startGrokVoiceCall() {
   active = { call, dispose, heardUser: heardGrokUser, prepared };
   announcer = {
     say: (text) => call.say(text),
-    announce: (text) => {
+    announce: (text, record) => {
       call.announce(text);
-      remember("Update", text);
+      if (record !== false) remember("Update", text);
     },
     setMuted: (muted) => call.setMuted(muted),
     stop: () => call.stop(),

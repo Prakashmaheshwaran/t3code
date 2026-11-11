@@ -34,7 +34,13 @@ import {
   standingInstructions,
   type Summarize,
 } from "../voiceCalls/memory.ts";
-import { recentNotes, saveCall, voiceCallsDir } from "../voiceCalls/store.ts";
+import {
+  recentNotes,
+  saveCall,
+  savesSettled,
+  trackSave,
+  voiceCallsDir,
+} from "../voiceCalls/store.ts";
 
 const RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_BINARIES = ["codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"];
@@ -80,10 +86,11 @@ export function codexTokenIdentity(token: string) {
 
 type Notification = { method: string; params: Record<string, unknown> };
 
+// Letters and digits in any script, so Tamil or Hindi words still have a key.
 const wordsKey = (text: string) =>
   text
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
 
 /** One `codex app-server` over stdio JSON-RPC. */
@@ -503,9 +510,6 @@ export const layer = Layer.effect(
       await stopSession(threadId);
     };
 
-    // Saves still writing, so a call placed right after a hang-up starts with its notes.
-    const saving = new Set<Promise<void>>();
-
     /** Ends the call for good: hung up, abandoned, or not resumed after a drop. */
     const close = (call: Call, reason?: string) => {
       if (call.closed) return;
@@ -514,13 +518,8 @@ export const layer = Layer.effect(
       clearTimeout(call.dropTimer);
       void retire(call, call.threadId);
       call.push({ type: "closed", ...(reason ? { reason } : {}) });
-      const saved = save(call);
-      saving.add(saved);
-      void saved.finally(() => {
-        saving.delete(saved);
-        // Keep the final events readable briefly, then forget the call.
-        setTimeout(() => calls.delete(call.id), 60_000);
-      });
+      // Keep the final events readable briefly, then forget the call.
+      void trackSave(save(call)).finally(() => setTimeout(() => calls.delete(call.id), 60_000));
     };
 
     /** The realtime session ended on its own; the app gets a moment to continue the call. */
@@ -538,13 +537,18 @@ export const layer = Layer.effect(
       call.push({ type: "closed", resumable: true, ...(reason ? { reason } : {}) });
     };
 
+    /** Whether the session that asked is still the live one, so its handoff can answer. */
+    const canSpeakIn = (call: Call, askedBy: string) =>
+      askedBy === call.threadId && !call.switching && call.dropTimer === undefined;
+
     const answerNews = (askedBy: string, prompt: string, answer: string) =>
       askedBy === "typed"
         ? `The user typed this request instead of saying it: ${JSON.stringify(prompt)}. It's done; tell them the outcome in your own words: ${answer}`
         : `The answer to the user's earlier request ${JSON.stringify(prompt)} came back; tell them: ${answer}`;
 
     const delegate = (call: Call, id: string, prompt: string, askedBy: string) => {
-      if (call.handled.has(id)) return;
+      // A handoff from a session retired at hang-up must not start work after the call.
+      if (call.closed || call.handled.has(id)) return;
       call.handled.add(id);
       call.push({ type: "delegating", id });
       const deltaStart = call.delegatedUpTo;
@@ -556,7 +560,9 @@ export const layer = Layer.effect(
       // Live's own transcript of these words arrives later and is dropped, so they're kept here.
       call.add("User", prompt);
       call.delegatedUpTo = call.lines.length;
-      call.delegatedWords.add(wordsKey(prompt));
+      // Typed words never come back as a transcript, so only spoken ones are expected late.
+      const key = wordsKey(prompt);
+      if (askedBy !== "typed" && key) call.delegatedWords.add(key);
       void runPromise(
         grok.delegateWith(
           {
@@ -580,7 +586,7 @@ export const layer = Layer.effect(
           foldIfLong(call);
           // Live speaks an answer only inside the handoff that asked; otherwise it's news, with
           // enough context that the voice tells it rather than acting on it.
-          if (askedBy === call.threadId) speak(call, result.speech);
+          if (canSpeakIn(call, askedBy)) speak(call, result.speech);
           else call.push({ type: "announce", text: answerNews(askedBy, prompt, result.speech) });
           call.push({
             type: "delegated",
@@ -593,7 +599,7 @@ export const layer = Layer.effect(
         (error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);
           call.add("T3 Code", `Failed: ${message}`);
-          if (askedBy === call.threadId) speak(call, `That failed: ${message}`);
+          if (canSpeakIn(call, askedBy)) speak(call, `That failed: ${message}`);
           else
             call.push({
               type: "announce",
@@ -736,12 +742,19 @@ export const layer = Layer.effect(
     };
 
     /** Moves a call onto a new realtime session: before a long one runs out, or after a drop. */
+    /**
+     * Moves a call onto a new realtime session: before a long one runs out, or after a drop. The
+     * old session keeps talking until the new one answers, and stays if a planned move fails.
+     */
     const resume = async (callId: string, request: ChatGptVoiceStartRequest) => {
       const call = calls.get(callId);
       if (!call || call.closed) throw failure("no-call");
+      const dropped = call.dropTimer !== undefined;
       // From here the call either moves or closes; the drop timer must not end it midway.
       clearTimeout(call.dropTimer);
       call.switching = true;
+      const previous = call.threadId;
+      let opened = false;
       try {
         // Folded while the old session still talks; lines a slow fold misses are seeded verbatim.
         await within(
@@ -749,18 +762,27 @@ export const layer = Layer.effect(
           RESUME_FOLD_WAIT_MS,
         );
         if (call.closed) throw failure("no-call");
-        await retire(call, call.threadId);
         if (request.viewed) call.viewed = request.viewed;
+        // The old session's last transcripts and handoffs still count while the new one starts.
+        call.pastThreads.add(previous);
         const sdp = await openSession(call, request.sdp, request.voice, true);
+        opened = true;
+        void retire(call, previous);
         // Hung up while the new session was starting: nothing may keep it running.
         if (call.closed) {
           void retire(call, call.threadId);
           throw failure("no-call");
         }
         call.lastError = "";
+        call.dropTimer = undefined;
         return { callId: call.id, sdp };
       } catch (error) {
-        close(call, "Couldn't continue the call.");
+        if (!dropped && !opened && !call.closed) {
+          // A planned move that failed leaves the call on the session it already had.
+          if (call.threadId && call.threadId !== previous) void stopSession(call.threadId);
+          call.threadId = previous;
+          call.pastThreads.delete(previous);
+        } else close(call, "Couldn't continue the call.");
         throw error;
       } finally {
         call.switching = false;
@@ -776,7 +798,7 @@ export const layer = Layer.effect(
         call.keepDays = request.keepDays;
         call.replyLanguage = request.replyLanguage;
         call.standing = standingInstructions(request.replyLanguage);
-        await within(Promise.all(saving), SAVE_WAIT_MS);
+        await savesSettled(SAVE_WAIT_MS);
         if (request.keepDays !== 0) call.earlier = recentNotes(callsDir, Date.now());
         calls.set(call.id, call);
         try {

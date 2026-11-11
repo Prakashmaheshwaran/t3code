@@ -90,6 +90,8 @@ export class GrokRealtimeCall {
   private pendingResponses: unknown[] = [];
   private options: RealtimeOptions | undefined;
   private sessionStartedAt = 0;
+  /** Counts sessions, so a tool result knows whether the session that asked is still live. */
+  session = 0;
 
   constructor(private readonly callbacks: RealtimeCallbacks) {}
 
@@ -126,6 +128,11 @@ export class GrokRealtimeCall {
   /** How long the current session has run. */
   get sessionAge() {
     return this.sessionStartedAt ? Date.now() - this.sessionStartedAt : 0;
+  }
+
+  /** Grok is answering or still playing its answer, so this isn't the moment to switch. */
+  get busy() {
+    return this.responseActive || this.playing.size > 0 || this.userText !== "";
   }
 
   /**
@@ -168,6 +175,7 @@ export class GrokRealtimeCall {
         }
         // A new session starts with nothing in flight.
         this.ws = ws;
+        this.session++;
         this.responseActive = false;
         this.pendingResponses = [];
         this.sessionStartedAt = Date.now();
@@ -184,14 +192,20 @@ export class GrokRealtimeCall {
             tools: options.tools.map((tool) => ({ type: "function", ...tool })),
           },
         });
+        // Framed like status updates: context to remember, never a request to act on.
         const context = seedText(seed);
         if (context)
           this.send({
             type: "conversation.item.create",
             item: {
               type: "message",
-              role: "system",
-              content: [{ type: "input_text", text: `The call so far:\n${context}` }],
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: `[Context from T3 Code about this call so far, not a request from me]\n${context}`,
+                },
+              ],
             },
           });
         this.callbacks.onStatus("live");

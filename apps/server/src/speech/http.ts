@@ -223,9 +223,8 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
         "grokDelegate",
         Effect.fn("environment.voice.grokDelegate")(function* (args) {
           yield* guard(args.endpoint.name);
-          return yield* args.payload.callId
-            ? grokCalls.delegate(args.payload)
-            : grok.delegate(args.payload);
+          // A request without a known call runs statelessly.
+          return yield* grokCalls.delegate(args.payload);
         }),
       )
       .handle(

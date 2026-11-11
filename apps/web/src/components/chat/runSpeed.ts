@@ -90,9 +90,11 @@ export function deriveRunSpeeds(input: {
     if (item.providerTurnId === null) continue;
     const at = millis(item.startedAt);
     if (at === null) continue;
-    if (WAITING_TYPES.has(item.type)) {
+    const end = millis(item.completedAt);
+    // A span still open at the turn's end, such as a background command, may overlap writing.
+    if (WAITING_TYPES.has(item.type) && end !== null) {
       const spans = waitingByTurn.get(item.providerTurnId) ?? [];
-      spans.push([at, millis(item.completedAt) ?? Number.POSITIVE_INFINITY]);
+      spans.push([at, end]);
       waitingByTurn.set(item.providerTurnId, spans);
     }
     if (!MODEL_OUTPUT_TYPES.has(item.type)) continue;

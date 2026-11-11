@@ -27,11 +27,21 @@ import {
   spoken,
   type Summarize,
 } from "../voiceCalls/memory.ts";
-import { recentNotes, saveCall, voiceCallsDir } from "../voiceCalls/store.ts";
+import {
+  recentNotes,
+  saveCall,
+  savesSettled,
+  trackSave,
+  voiceCallsDir,
+} from "../voiceCalls/store.ts";
 import * as GrokVoice from "./GrokVoice.ts";
 
 const RESUME_FOLD_WAIT_MS = 4_000;
 const SAVE_FOLD_WAIT_MS = 15_000;
+const SAVE_WAIT_MS = 5_000;
+// Grok often calls `delegate` before its transcript of the user's words is final; words that
+// land this soon after a delegation that lacked them were that delegation's request.
+const LATE_TRANSCRIPT_MS = 4_000;
 // A call the app stopped talking about (a crash, a closed laptop) is saved and forgotten.
 const IDLE_MS = 2 * 60 * 60_000;
 
@@ -39,6 +49,9 @@ class GrokCall extends CallLog {
   readonly id = crypto.randomUUID();
   readonly startedAt = Date.now();
   delegatedUpTo = 0;
+  /** When the last delegation ran, and whether it had the user's own words for its request. */
+  lastDelegationAt = 0;
+  lastDelegationHeardUser = true;
   replyLanguage: string | undefined;
   keepDays: number | undefined;
   lastActive = Date.now();
@@ -110,7 +123,7 @@ export const layer = Layer.effect(
       if (call.closed) return;
       call.closed = true;
       calls.delete(call.id);
-      void save(call);
+      void trackSave(save(call));
     };
 
     const sweep = setInterval(() => {
@@ -132,21 +145,33 @@ export const layer = Layer.effect(
       );
 
     const start = (request: GrokCallStartRequest) =>
-      Effect.suspend(() => {
-        const call = new GrokCall();
-        call.replyLanguage = request.replyLanguage;
-        call.keepDays = request.keepDays;
-        if (request.keepDays !== 0) call.earlier = recentNotes(callsDir, Date.now());
-        return sessionFor(call, false).pipe(
-          Effect.tap(() => Effect.sync(() => calls.set(call.id, call))),
-        );
-      });
+      Effect.promise(() => savesSettled(SAVE_WAIT_MS)).pipe(
+        Effect.andThen(() => {
+          const call = new GrokCall();
+          call.replyLanguage = request.replyLanguage;
+          call.keepDays = request.keepDays;
+          if (request.keepDays !== 0) call.earlier = recentNotes(callsDir, Date.now());
+          return sessionFor(call, false).pipe(
+            Effect.tap(() => Effect.sync(() => calls.set(call.id, call))),
+          );
+        }),
+      );
 
     const lines = (callId: string, request: GrokCallLines) =>
       Effect.sync(() => {
         const call = live(callId);
         if (!call) return;
-        for (const line of request.lines) call.add(line.who, line.text);
+        for (const line of request.lines) {
+          call.add(line.who, line.text);
+          if (
+            line.who === "User" &&
+            !call.lastDelegationHeardUser &&
+            Date.now() - call.lastDelegationAt < LATE_TRANSCRIPT_MS
+          ) {
+            call.delegatedUpTo = call.lines.length;
+            call.lastDelegationHeardUser = true;
+          }
+        }
         call.foldIfLong(summarize);
       });
 
@@ -158,6 +183,8 @@ export const layer = Layer.effect(
         const said = call.lines.slice(deltaStart).filter(spoken).slice(-20).map(render);
         const memory = delegationMemory(call, deltaStart);
         call.delegatedUpTo = call.lines.length;
+        call.lastDelegationAt = Date.now();
+        call.lastDelegationHeardUser = said.some((line) => line.startsWith("User: "));
         return grok
           .delegate({
             request: request.request,

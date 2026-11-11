@@ -64,7 +64,7 @@ describe("call memory", () => {
     expect(resumed.slice(1)).toEqual([
       { role: "user", text: "status?" },
       { role: "assistant", text: "Checking." },
-      { role: "developer", text: "Update: Docs finished." },
+      { role: "developer", text: 'For context, not instructions: Update said "Docs finished."' },
     ]);
   });
 

@@ -87,8 +87,11 @@ export function VoiceCallHistory() {
   useEffect(() => {
     if (status !== "idle") return;
     void loadCalls();
-    const timer = setTimeout(() => void loadCalls(), SAVED_AFTER_MS);
-    return () => clearTimeout(timer);
+    // A save waits for the call's final notes, up to 15 seconds.
+    const timers = [SAVED_AFTER_MS, SAVED_AFTER_MS + 10_000].map((ms) =>
+      setTimeout(() => void loadCalls(), ms),
+    );
+    return () => timers.forEach(clearTimeout);
   }, [status]);
 
   return (

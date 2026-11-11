@@ -50,6 +50,16 @@ describe("voice call store", () => {
     expect(listCalls(dir)).toEqual([]);
   });
 
+  it("ignores files in the folder that aren't saved calls", () => {
+    const dir = tempDir();
+    const now = Date.UTC(2026, 10, 10, 12);
+    saveCall(dir, call("real", now));
+    NodeFS.writeFileSync(NodePath.join(dir, "recent.json"), "[]");
+    NodeFS.writeFileSync(NodePath.join(dir, "notes.md"), "# old");
+    expect(listCalls(dir).map((saved) => saved.id)).toEqual(["real-0000-0000"]);
+    expect(recentNotes(dir, now)).toContain("- real");
+  });
+
   it("refuses ids that could leave the directory", () => {
     const dir = tempDir();
     expect(readCall(dir, "../../etc/passwd")).toBeUndefined();

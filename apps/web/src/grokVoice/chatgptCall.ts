@@ -167,6 +167,8 @@ export class ChatGptCall {
       return true;
     } catch (error) {
       if (session && this.peer !== session.peer) session.peer.close();
+      // A planned refresh that failed leaves the call on the session it already had.
+      if (dropped === undefined && !this.stopped) return false;
       this.stop(serverReason(error) ?? dropped ?? "Couldn't refresh the call.");
       return false;
     } finally {
@@ -254,7 +256,7 @@ export class ChatGptCall {
    * the call's own channel: Codex's appendSpeech is only spoken inside a pending handoff, and
    * once any handoff happened GPT-Live ignores session context, so news joins the last one.
    */
-  announce(text: string) {
+  announce(text: string, record = true) {
     if (this.channel?.readyState === "open") {
       for (const part of speakableChunks(text))
         this.sendLive(
@@ -273,7 +275,7 @@ export class ChatGptCall {
               },
         );
       // The server never saw this, and it belongs in the call's notes.
-      if (this.callId)
+      if (record && this.callId)
         void runEnvironmentSpeech(
           chatGptVoiceContext(this.prepared, this.callId, { remember: text }),
         ).catch(() => {});
