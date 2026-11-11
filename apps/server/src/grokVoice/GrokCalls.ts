@@ -169,8 +169,8 @@ export const layer = Layer.effect(
           .pipe(
             Effect.tap((result) =>
               Effect.sync(() => {
-                const where = result.sent.map((sent) =>
-                  JSON.stringify(sent.title || sent.threadId),
+                const where = result.sent.flatMap((sent) =>
+                  sent.title ? [JSON.stringify(sent.title)] : [],
                 );
                 call.add(
                   "T3 Code",

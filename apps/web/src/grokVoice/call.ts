@@ -518,6 +518,10 @@ async function startGrokVoiceCall() {
           return delegated(event);
         case "note":
           return addLine({ who: "note", text: event.text });
+        case "announce":
+          // Waits for quiet like thread news, then goes to the session that's live now.
+          news.push(event.text);
+          return flushNews();
       }
     };
     const call: ChatGptCall = new ChatGptCall(prepared, {

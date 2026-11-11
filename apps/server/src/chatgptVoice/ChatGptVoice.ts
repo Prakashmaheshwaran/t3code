@@ -538,7 +538,12 @@ export const layer = Layer.effect(
       call.push({ type: "closed", resumable: true, ...(reason ? { reason } : {}) });
     };
 
-    const delegate = (call: Call, id: string, prompt: string) => {
+    const answerNews = (askedBy: string, prompt: string, answer: string) =>
+      askedBy === "typed"
+        ? `The user typed this request instead of saying it: ${JSON.stringify(prompt)}. It's done; tell them the outcome in your own words: ${answer}`
+        : `The answer to the user's earlier request ${JSON.stringify(prompt)} came back; tell them: ${answer}`;
+
+    const delegate = (call: Call, id: string, prompt: string, askedBy: string) => {
       if (call.handled.has(id)) return;
       call.handled.add(id);
       call.push({ type: "delegating", id });
@@ -565,13 +570,18 @@ export const layer = Layer.effect(
         ),
       ).then(
         (result) => {
-          const where = result.sent.map((sent) => JSON.stringify(sent.title || sent.threadId));
+          const where = result.sent.flatMap((sent) =>
+            sent.title ? [JSON.stringify(sent.title)] : [],
+          );
           call.add(
             "T3 Code",
             `${result.speech}${where.length ? ` (sent to ${where.join(", ")})` : ""}`,
           );
           foldIfLong(call);
-          speak(call, result.speech);
+          // Live speaks an answer only inside the handoff that asked; otherwise it's news, with
+          // enough context that the voice tells it rather than acting on it.
+          if (askedBy === call.threadId) speak(call, result.speech);
+          else call.push({ type: "announce", text: answerNews(askedBy, prompt, result.speech) });
           call.push({
             type: "delegated",
             id,
@@ -583,7 +593,12 @@ export const layer = Layer.effect(
         (error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);
           call.add("T3 Code", `Failed: ${message}`);
-          speak(call, `That failed: ${message}`);
+          if (askedBy === call.threadId) speak(call, `That failed: ${message}`);
+          else
+            call.push({
+              type: "announce",
+              text: answerNews(askedBy, prompt, `It failed: ${message}`),
+            });
           call.push({ type: "note", text: `Delegation failed: ${message}` });
           call.push({ type: "delegated", id, speech: "", sent: [] });
         },
@@ -620,7 +635,7 @@ export const layer = Layer.effect(
           if (item?.type !== "handoff_request") return;
           const id = String(item.handoff_id ?? item.item_id ?? "");
           const prompt = typeof item.input_transcript === "string" ? item.input_transcript : "";
-          if (id) delegate(call, id, prompt.trim());
+          if (id) delegate(call, id, prompt.trim(), threadId);
           return;
         }
         case "thread/realtime/transcript/done":
@@ -642,6 +657,8 @@ export const layer = Layer.effect(
     const onPastSessionEvent = (call: Call, { method, params }: Notification, threadId: string) => {
       if (method === "turn/started") interruptCodexTurn(threadId, params);
       else if (method === "thread/realtime/transcript/done") heardTranscript(call, params);
+      else if (method === "thread/realtime/itemAdded")
+        onCallEvent(call, { method, params }, threadId);
     };
 
     const sdpAnswer = (running: AppServer, threadId: string) =>
@@ -804,19 +821,10 @@ export const layer = Layer.effect(
         foldIfLong(call);
       }
       if (request.announce) speak(call, request.announce);
+      // GPT-Live answers typed text itself instead of handing it off, so it goes straight to
+      // the delegator, and the voice tells the outcome like other news.
       const typed = request.say?.trim();
-      if (typed) {
-        call.add("User", typed);
-        foldIfLong(call);
-        yield* tryCodex(async () => {
-          const running = await appServer();
-          await running.request("thread/realtime/appendText", {
-            threadId: call.threadId,
-            text: typed,
-            role: "user",
-          });
-        });
-      }
+      if (typed) delegate(call, `typed-${crypto.randomUUID()}`, typed, "typed");
     });
 
     const end = (callId: string) =>

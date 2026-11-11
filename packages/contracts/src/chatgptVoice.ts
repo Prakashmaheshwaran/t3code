@@ -63,6 +63,8 @@ export const ChatGptVoiceEvent = Schema.Union([
     sent: Schema.Array(GrokVoiceSentPrompt),
   }),
   Schema.Struct({ type: Schema.Literal("note"), text: Schema.String }),
+  /** An answer for the voice to tell as news: its session moved on before it came back. */
+  Schema.Struct({ type: Schema.Literal("announce"), text: Schema.String }),
   Schema.Struct({
     type: Schema.Literal("closed"),
     reason: Schema.optionalKey(Schema.String),

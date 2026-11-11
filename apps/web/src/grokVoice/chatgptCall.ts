@@ -266,8 +266,9 @@ export class ChatGptCall {
                 content: [{ type: "input_text", text: part }],
               }
             : {
+                // The channel Codex's own appendSpeech uses for words the voice should say.
                 type: "session.context.append",
-                channel: "commentary",
+                channel: "speakable",
                 content: [{ type: "input_text", text: part }],
               },
         );
