@@ -23,6 +23,15 @@ export const ChatGptVoiceStartRequest = Schema.Struct({
   viewed: Schema.optionalKey(GrokVoiceViewed),
   /** The Codex model the delegator thinks with; the server's default when omitted. */
   delegatorModel: Schema.optionalKey(Schema.String),
+  /**
+   * A call to continue in a fresh realtime session, seeded with that call's notes. Used before a
+   * long session runs out of room, and after one drops.
+   */
+  resume: Schema.optionalKey(Schema.String),
+  /** The language the voice always answers in; it matches the user's when omitted. */
+  replyLanguage: Schema.optionalKey(Schema.String),
+  /** Days to keep the call in the history; 0 doesn't save it. Kept until pruned when omitted. */
+  keepDays: Schema.optionalKey(Schema.Number),
 });
 export type ChatGptVoiceStartRequest = typeof ChatGptVoiceStartRequest.Type;
 
@@ -54,7 +63,14 @@ export const ChatGptVoiceEvent = Schema.Union([
     sent: Schema.Array(GrokVoiceSentPrompt),
   }),
   Schema.Struct({ type: Schema.Literal("note"), text: Schema.String }),
-  Schema.Struct({ type: Schema.Literal("closed"), reason: Schema.optionalKey(Schema.String) }),
+  /** An answer for the voice to tell as news: its session moved on before it came back. */
+  Schema.Struct({ type: Schema.Literal("announce"), text: Schema.String }),
+  Schema.Struct({
+    type: Schema.Literal("closed"),
+    reason: Schema.optionalKey(Schema.String),
+    /** Only the realtime session ended; the call can go on in a new one with `resume`. */
+    resumable: Schema.optionalKey(Schema.Boolean),
+  }),
 ]);
 export type ChatGptVoiceEvent = typeof ChatGptVoiceEvent.Type;
 
@@ -68,6 +84,10 @@ export const ChatGptVoiceContextRequest = Schema.Struct({
   viewed: Schema.optionalKey(GrokVoiceViewed),
   /** News for the voice agent to tell the user, such as a thread finishing. */
   announce: Schema.optionalKey(Schema.String),
+  /** News the app already told the voice agent itself, kept in the call's notes. */
+  remember: Schema.optionalKey(Schema.String),
+  /** Something the user typed instead of saying. */
+  say: Schema.optionalKey(Schema.String),
 });
 export type ChatGptVoiceContextRequest = typeof ChatGptVoiceContextRequest.Type;
 

@@ -24,6 +24,13 @@ import {
   ChatGptVoiceStartResult,
 } from "./chatgptVoice.ts";
 import {
+  GrokCallLines,
+  GrokCallSession,
+  GrokCallStartRequest,
+  VoiceCallList,
+  VoiceCallLookup,
+} from "./voiceCalls.ts";
+import {
   AuthAccessTokenResult,
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
@@ -989,6 +996,70 @@ export class EnvironmentVoiceHttpApi extends HttpApiGroup.make("voice")
     HttpApiEndpoint.post("chatgptEnd", "/api/voice/chatgpt/calls/:callId/end", {
       headers: OptionalBearerHeaders,
       params: Schema.Struct({ callId: Schema.String }),
+      success: HttpApiSchema.NoContent,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("grokCallStart", "/api/voice/grok/calls", {
+      headers: OptionalBearerHeaders,
+      payload: GrokCallStartRequest,
+      success: GrokCallSession,
+      error: [...EnvironmentScopedOperationErrors, GrokVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("grokCallLines", "/api/voice/grok/calls/:callId/lines", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      payload: GrokCallLines,
+      success: HttpApiSchema.NoContent,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // Folds the call's notes, then hands out a fresh session seeded with them.
+    HttpApiEndpoint.post("grokCallResume", "/api/voice/grok/calls/:callId/resume", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      success: GrokCallSession,
+      error: [...EnvironmentScopedOperationErrors, GrokVoiceError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("grokCallEnd", "/api/voice/grok/calls/:callId/end", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      success: HttpApiSchema.NoContent,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("voiceCalls", "/api/voice/calls", {
+      headers: OptionalBearerHeaders,
+      success: VoiceCallList,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("voiceCall", "/api/voice/calls/:callId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      success: VoiceCallLookup,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteVoiceCall", "/api/voice/calls/:callId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ callId: Schema.String }),
+      success: HttpApiSchema.NoContent,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("clearVoiceCalls", "/api/voice/calls", {
+      headers: OptionalBearerHeaders,
       success: HttpApiSchema.NoContent,
       error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),

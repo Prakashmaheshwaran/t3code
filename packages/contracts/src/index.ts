@@ -36,6 +36,7 @@ export * from "./projectClone.ts";
 export * from "./speech.ts";
 export * from "./grokVoice.ts";
 export * from "./chatgptVoice.ts";
+export * from "./voiceCalls.ts";
 export * from "./pullRequest.ts";
 export * from "./pullRequestReviewGuide.ts";
 export * from "./orchestrationDispatch.ts";

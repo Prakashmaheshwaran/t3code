@@ -1,4 +1,5 @@
 import { MicIcon, MicOffIcon, PhoneOffIcon, XIcon } from "lucide-react";
+import { useLayoutEffect, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { cn } from "~/lib/utils";
@@ -14,14 +15,67 @@ import {
   useGrokVoiceStore,
 } from "./call";
 
-const VISIBLE_LINES = 6;
+/** The call so far. It follows `lines` alone, so the level meter doesn't re-render it. */
+function CallTranscript({ name }: { name: string }) {
+  const lines = useGrokVoiceStore((state) => state.lines);
+  const list = useRef<HTMLOListElement>(null);
+  // Follows new lines unless the user scrolled up to read.
+  const pinned = useRef(true);
+  const lastId = lines.at(-1)?.id;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the list's DOM scroll position on the newest line, and re-pins when a new call clears it
+  useLayoutEffect(() => {
+    const element = list.current;
+    if (lastId === undefined) pinned.current = true;
+    else if (element && pinned.current) element.scrollTop = element.scrollHeight;
+  }, [lastId]);
+  return (
+    <ol
+      ref={list}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+      }}
+      className="flex max-h-64 flex-col gap-1 overflow-y-auto text-xs"
+    >
+      {lines.map((line) => (
+        <li
+          key={line.id}
+          className={cn(
+            line.who === "you" && "text-foreground",
+            line.who === "grok" && "text-muted-foreground",
+            line.who === "note" && "text-muted-foreground italic",
+          )}
+        >
+          <span className="font-medium">
+            {line.who === "you" ? "You: " : line.who === "grok" ? `${name}: ` : ""}
+          </span>
+          {line.text}
+        </li>
+      ))}
+    </ol>
+  );
+}
 
-/** Floating call surface; renders nothing unless a call is on or just failed. */
+/** Floating call surface; renders nothing unless a call is on, just ended, or just failed. */
 export function GrokVoiceCallPanel() {
-  const { status, error, lines, speaking, muted, delegating, level, voice, provider, canType } =
-    useGrokVoiceStore(useShallow((state) => state));
+  const { status, error, hasLines, speaking, muted, delegating, level, voice, provider, canType } =
+    useGrokVoiceStore(
+      useShallow((state) => ({
+        status: state.status,
+        error: state.error,
+        hasLines: state.lines.length > 0,
+        speaking: state.speaking,
+        muted: state.muted,
+        delegating: state.delegating,
+        level: state.level,
+        voice: state.voice,
+        provider: state.provider,
+        canType: state.canType,
+      })),
+    );
   const name = VOICE_PROVIDERS[provider].label;
-  if (status === "idle" && !error) return null;
+  // A finished call's transcript stays until dismissed.
+  if (status === "idle" && !error && !hasLines) return null;
 
   const label =
     status === "connecting"
@@ -65,7 +119,7 @@ export function GrokVoiceCallPanel() {
             size="icon-micro"
             className="ml-auto"
             aria-label="Dismiss"
-            onClick={() => useGrokVoiceStore.setState({ error: null })}
+            onClick={() => useGrokVoiceStore.setState({ error: null, lines: [] })}
           >
             <XIcon />
           </Button>
@@ -74,25 +128,8 @@ export function GrokVoiceCallPanel() {
 
       {error ? <p className="text-xs text-destructive-foreground">{error}</p> : null}
 
-      {lines.length > 0 ? (
-        <ol className="flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
-          {lines.slice(-VISIBLE_LINES).map((line, index) => (
-            <li
-              // Lines only append, so position is a stable identity within the window.
-              key={`${lines.length - VISIBLE_LINES + index}`}
-              className={cn(
-                line.who === "you" && "text-foreground",
-                line.who === "grok" && "text-muted-foreground",
-                line.who === "note" && "text-muted-foreground italic",
-              )}
-            >
-              <span className="font-medium">
-                {line.who === "you" ? "You: " : line.who === "grok" ? `${name}: ` : ""}
-              </span>
-              {line.text}
-            </li>
-          ))}
-        </ol>
+      {hasLines ? (
+        <CallTranscript name={name} />
       ) : status === "live" ? (
         <p className="text-xs text-muted-foreground">
           Say what you want done. {name} hands it to your threads.
@@ -114,7 +151,7 @@ export function GrokVoiceCallPanel() {
             size="compact"
             nativeInput
             placeholder="Type instead…"
-            aria-label="Type to Grok"
+            aria-label={`Type to ${name}`}
             autoComplete="off"
           />
         </form>

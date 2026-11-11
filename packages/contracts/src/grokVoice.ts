@@ -23,8 +23,15 @@ export const GrokVoiceDelegateRequest = Schema.Struct({
   /** Both sides of the call since the previous delegation, as `User: …` / `Voice agent: …` lines. */
   transcript: Schema.Array(Schema.String),
   viewed: Schema.optionalKey(GrokVoiceViewed),
-  /** Threads that already got the full voice-delegation header in this call. */
-  explained: Schema.Array(Schema.String),
+  /** Notes on the call so far, and on recent calls, for requests that refer back to them. */
+  memory: Schema.optionalKey(Schema.String),
+  /** The language spoken replies are in; the user's own when omitted. */
+  replyLanguage: Schema.optionalKey(Schema.String),
+  /**
+   * A call the server remembers (`grokCallStart`). Its own lines then stand in for `transcript`,
+   * and its notes for `memory`.
+   */
+  callId: Schema.optionalKey(Schema.String),
 });
 export type GrokVoiceDelegateRequest = typeof GrokVoiceDelegateRequest.Type;
 
@@ -43,7 +50,6 @@ export const GrokVoiceDelegateResult = Schema.Struct({
   open: Schema.optionalKey(Schema.String),
   /** Work admitted this request, for announcing replies when they land. */
   sent: Schema.Array(GrokVoiceSentPrompt),
-  explained: Schema.Array(Schema.String),
 });
 export type GrokVoiceDelegateResult = typeof GrokVoiceDelegateResult.Type;
 

@@ -43,7 +43,15 @@ function speakableChunks(text: string) {
   return parts;
 }
 
+/** The server's own words for why a request failed, when it gave any. */
+function serverReason(error: unknown) {
+  const cause = (error as { cause?: { message?: unknown } } | undefined)?.cause;
+  return typeof cause?.message === "string" ? cause.message : undefined;
+}
+
 const ICE_WAIT_MS = 3000;
+// Reconnecting again sooner than this means sessions keep failing, so the call ends instead.
+const MIN_RESUME_GAP_MS = 60_000;
 
 export class ChatGptCall {
   private readonly prepared: PreparedConnection;
@@ -61,6 +69,14 @@ export class ChatGptCall {
   private lastDelegation: string | undefined;
   private sentEvents = 0;
   private muted = false;
+  private input:
+    | Pick<ChatGptVoiceStartRequest, "voice" | "delegatorModel" | "replyLanguage" | "keepDays">
+    | undefined;
+  private viewed: GrokVoiceViewed | undefined;
+  private sessionStartedAt = 0;
+  private switching = false;
+  /** When a dropped session was last continued; a planned refresh doesn't count. */
+  private lastResumeAt = 0;
 
   constructor(prepared: PreparedConnection, callbacks: ChatGptCallCallbacks) {
     this.prepared = prepared;
@@ -71,7 +87,16 @@ export class ChatGptCall {
     voice: ChatGptVoiceStartRequest["voice"];
     viewed?: GrokVoiceViewed;
     delegatorModel?: string | undefined;
+    replyLanguage?: string | undefined;
+    keepDays?: number | undefined;
   }) {
+    this.input = {
+      voice: input.voice,
+      ...(input.delegatorModel ? { delegatorModel: input.delegatorModel } : {}),
+      ...(input.replyLanguage ? { replyLanguage: input.replyLanguage } : {}),
+      ...(input.keepDays !== undefined ? { keepDays: input.keepDays } : {}),
+    };
+    this.viewed = input.viewed;
     try {
       this.stream = await openCallMicrophone();
     } catch (error) {
@@ -82,23 +107,108 @@ export class ChatGptCall {
         { cause: error },
       );
     }
-    const peer = new RTCPeerConnection();
-    this.peer = peer;
-    for (const track of this.stream.getAudioTracks()) peer.addTrack(track, this.stream);
-    this.channel = peer.createDataChannel("oai-events");
-    // GPT-Live's own events show who is talking without a round trip through the server.
-    this.channel.onmessage = (message: MessageEvent<string>) => this.onLiveEvent(message.data);
     // A media element pulls the remote track in Chromium; Web Audio alone can report silence.
     this.audio = new Audio();
     this.audio.autoplay = true;
-    peer.ontrack = (event) => {
-      if (this.audio) this.audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-    };
-    peer.onconnectionstatechange = () => {
-      if (peer.connectionState === "failed") this.stop("The audio connection dropped.");
-    };
     this.meter();
 
+    const session = await this.offer();
+    try {
+      if (this.stopped) throw new Error("Hung up.");
+      const started = await runEnvironmentSpeech(
+        startChatGptVoiceCall(this.prepared, this.request(session.sdp)),
+      );
+      this.callId = started.callId;
+      if (this.stopped) {
+        void this.endOnServer();
+        throw new Error("Hung up.");
+      }
+      await session.peer.setRemoteDescription({ type: "answer", sdp: started.sdp });
+    } catch (error) {
+      session.peer.close();
+      if (this.stopped) return;
+      throw error;
+    }
+    this.use(session.peer, session.channel);
+    this.callbacks.onStatus("live");
+    void this.follow();
+  }
+
+  /** How long the current realtime session has run. */
+  get sessionAge() {
+    return this.sessionStartedAt ? Date.now() - this.sessionStartedAt : 0;
+  }
+
+  /** Moving to a new session right now, after a drop or for a refresh. */
+  get switchingSessions() {
+    return this.switching;
+  }
+
+  /**
+   * Moves the call onto a new realtime session, which the server seeds with the call's notes and
+   * latest lines. The old session keeps talking until the new one answers.
+   */
+  async refresh(dropped?: string): Promise<boolean> {
+    if (this.stopped || this.switching || !this.callId) return false;
+    this.switching = true;
+    if (dropped !== undefined) this.lastResumeAt = Date.now();
+    let session: Awaited<ReturnType<ChatGptCall["offer"]>> | undefined;
+    try {
+      session = await this.offer();
+      if (this.stopped) throw new Error("Hung up.");
+      const resumed = await runEnvironmentSpeech(
+        startChatGptVoiceCall(this.prepared, { ...this.request(session.sdp), resume: this.callId }),
+      );
+      if (this.stopped) throw new Error("stopped");
+      await session.peer.setRemoteDescription({ type: "answer", sdp: resumed.sdp });
+      const previous = this.peer;
+      this.use(session.peer, session.channel);
+      previous?.close();
+      return true;
+    } catch (error) {
+      if (session && this.peer !== session.peer) session.peer.close();
+      // A planned refresh that failed leaves the call on the session it already had.
+      if (dropped === undefined && !this.stopped) return false;
+      this.stop(serverReason(error) ?? dropped ?? "Couldn't refresh the call.");
+      return false;
+    } finally {
+      this.switching = false;
+    }
+  }
+
+  private request(sdp: string): ChatGptVoiceStartRequest {
+    return {
+      voice: "cove",
+      ...this.input,
+      sdp,
+      ...(this.viewed ? { viewed: this.viewed } : {}),
+    };
+  }
+
+  /** A peer connection on the call's microphone, with its offer gathered. */
+  private async offer() {
+    const peer = new RTCPeerConnection();
+    const stream = this.stream;
+    if (stream) for (const track of stream.getAudioTracks()) peer.addTrack(track, stream);
+    const channel = peer.createDataChannel("oai-events");
+    // GPT-Live's own events show who is talking without a round trip through the server.
+    channel.onmessage = (message: MessageEvent<string>) => {
+      if (this.channel === channel) this.onLiveEvent(message.data);
+    };
+    channel.onopen = () => {
+      if (this.channel === channel && this.muted) this.sendLive({ type: "input_audio.pause" });
+    };
+    peer.ontrack = (event) => {
+      if (this.peer === peer && this.audio)
+        this.audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+    };
+    peer.onconnectionstatechange = () => {
+      // While a new session connects, the old peer failing is expected.
+      if (this.peer !== peer || this.switching || peer.connectionState !== "failed") return;
+      if (Date.now() - this.lastResumeAt > MIN_RESUME_GAP_MS)
+        void this.refresh("The audio connection dropped.");
+      else this.stop("The audio connection dropped.");
+    };
     await peer.setLocalDescription(await peer.createOffer());
     await new Promise<void>((resolve) => {
       if (peer.iceGatheringState === "complete") return resolve();
@@ -109,23 +219,24 @@ export class ChatGptCall {
         resolve();
       });
     });
-    if (this.stopped) return;
-    const started = await runEnvironmentSpeech(
-      startChatGptVoiceCall(this.prepared, {
-        sdp: peer.localDescription?.sdp ?? "",
-        voice: input.voice,
-        ...(input.delegatorModel ? { delegatorModel: input.delegatorModel } : {}),
-        ...(input.viewed ? { viewed: input.viewed } : {}),
-      }),
-    );
-    this.callId = started.callId;
-    if (this.stopped) {
-      void this.endOnServer();
-      return;
-    }
-    await peer.setRemoteDescription({ type: "answer", sdp: started.sdp });
-    this.callbacks.onStatus("live");
-    void this.follow();
+    return { peer, channel, sdp: peer.localDescription?.sdp ?? "" };
+  }
+
+  /** Makes a connected session the call's own: its audio plays and its events count. */
+  private use(peer: RTCPeerConnection, channel: RTCDataChannel) {
+    this.peer = peer;
+    this.channel = channel;
+    this.lastDelegation = undefined;
+    this.utterance = "";
+    this.sessionStartedAt = Date.now();
+    // A session that dropped mid-turn never said it stopped talking.
+    this.callbacks.onEvent({ type: "speaking", who: null });
+    const tracks = peer
+      .getReceivers()
+      .map((receiver) => receiver.track)
+      .filter((track) => track.kind === "audio");
+    if (this.audio && tracks.length > 0) this.audio.srcObject = new MediaStream(tracks);
+    if (channel.readyState === "open" && this.muted) this.sendLive({ type: "input_audio.pause" });
   }
 
   /** The microphone the call hears, for listening locally while muted. */
@@ -145,7 +256,7 @@ export class ChatGptCall {
    * the call's own channel: Codex's appendSpeech is only spoken inside a pending handoff, and
    * once any handoff happened GPT-Live ignores session context, so news joins the last one.
    */
-  announce(text: string) {
+  announce(text: string, record = true) {
     if (this.channel?.readyState === "open") {
       for (const part of speakableChunks(text))
         this.sendLive(
@@ -157,11 +268,17 @@ export class ChatGptCall {
                 content: [{ type: "input_text", text: part }],
               }
             : {
+                // The channel Codex's own appendSpeech uses for words the voice should say.
                 type: "session.context.append",
-                channel: "commentary",
+                channel: "speakable",
                 content: [{ type: "input_text", text: part }],
               },
         );
+      // The server never saw this, and it belongs in the call's notes.
+      if (record && this.callId)
+        void runEnvironmentSpeech(
+          chatGptVoiceContext(this.prepared, this.callId, { remember: text }),
+        ).catch(() => {});
       return;
     }
     if (!this.callId) return;
@@ -175,7 +292,16 @@ export class ChatGptCall {
       this.channel.send(JSON.stringify({ event_id: `t3_${++this.sentEvents}`, ...event }));
   }
 
+  /** Typed input, for when speaking isn't an option. */
+  say(text: string) {
+    if (!this.callId) return;
+    void runEnvironmentSpeech(chatGptVoiceContext(this.prepared, this.callId, { say: text })).catch(
+      () => this.callbacks.onEvent({ type: "note", text: "Couldn't send that to the call." }),
+    );
+  }
+
   updateViewed(viewed: GrokVoiceViewed | undefined) {
+    if (viewed) this.viewed = viewed;
     if (!this.callId || !viewed) return;
     void runEnvironmentSpeech(chatGptVoiceContext(this.prepared, this.callId, { viewed })).catch(
       () => {},
@@ -273,7 +399,18 @@ export class ChatGptCall {
         failures = 0;
         after = batch.next;
         for (const event of batch.events) {
-          if (event.type === "closed") return this.stop(event.reason);
+          if (event.type === "closed") {
+            // A session that drops mid-call is continued once; the server keeps the call meanwhile.
+            if (event.resumable && this.switching) continue;
+            if (event.resumable && Date.now() - this.lastResumeAt > MIN_RESUME_GAP_MS) {
+              this.callbacks.onEvent({ type: "note", text: "The call dropped. Reconnecting…" });
+              void this.refresh(event.reason ?? "The call dropped.").then((resumed) => {
+                if (resumed) this.callbacks.onEvent({ type: "note", text: "Reconnected." });
+              });
+              continue;
+            }
+            return this.stop(event.reason);
+          }
           this.callbacks.onEvent(event);
         }
       } catch {
