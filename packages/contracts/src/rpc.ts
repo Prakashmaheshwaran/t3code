@@ -383,6 +383,20 @@ import {
   ScheduledTaskUpsertInput,
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
+import {
+  ProjectGoalDeleteInput,
+  ProjectGoalDeleteResult,
+  ProjectGoalError,
+  ProjectGoalListInput,
+  ProjectGoalListResult,
+  ProjectGoalListSessionsInput,
+  ProjectGoalListSessionsResult,
+  ProjectGoalMutationResult,
+  ProjectGoalRunNowInput,
+  ProjectGoalRunNowResult,
+  ProjectGoalSetStatusInput,
+  ProjectGoalUpsertInput,
+} from "./projectGoal.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
   ProjectCloneActionInput,
@@ -559,6 +573,13 @@ export const WS_METHODS = {
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  projectGoalsSubscribe: "projectGoals.subscribe",
+  projectGoalsUpsert: "projectGoals.upsert",
+  projectGoalsSetStatus: "projectGoals.setStatus",
+  projectGoalsDelete: "projectGoals.delete",
+  projectGoalsRunNow: "projectGoals.runNow",
+  projectGoalsListSessions: "projectGoals.listSessions",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -2015,6 +2036,43 @@ const WsScheduledTasksGetWebhookDeliveryRpc = Rpc.make(
   },
 );
 
+const WsProjectGoalsSubscribeRpc = Rpc.make(WS_METHODS.projectGoalsSubscribe, {
+  payload: ProjectGoalListInput,
+  success: ProjectGoalListResult,
+  error: Schema.Union([ProjectGoalError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsProjectGoalsUpsertRpc = Rpc.make(WS_METHODS.projectGoalsUpsert, {
+  payload: ProjectGoalUpsertInput,
+  success: ProjectGoalMutationResult,
+  error: Schema.Union([ProjectGoalError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectGoalsSetStatusRpc = Rpc.make(WS_METHODS.projectGoalsSetStatus, {
+  payload: ProjectGoalSetStatusInput,
+  success: ProjectGoalMutationResult,
+  error: Schema.Union([ProjectGoalError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectGoalsDeleteRpc = Rpc.make(WS_METHODS.projectGoalsDelete, {
+  payload: ProjectGoalDeleteInput,
+  success: ProjectGoalDeleteResult,
+  error: Schema.Union([ProjectGoalError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectGoalsRunNowRpc = Rpc.make(WS_METHODS.projectGoalsRunNow, {
+  payload: ProjectGoalRunNowInput,
+  success: ProjectGoalRunNowResult,
+  error: Schema.Union([ProjectGoalError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectGoalsListSessionsRpc = Rpc.make(WS_METHODS.projectGoalsListSessions, {
+  payload: ProjectGoalListSessionsInput,
+  success: ProjectGoalListSessionsResult,
+  error: Schema.Union([ProjectGoalError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -2101,6 +2159,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
+  WsProjectGoalsSubscribeRpc,
+  WsProjectGoalsUpsertRpc,
+  WsProjectGoalsSetStatusRpc,
+  WsProjectGoalsDeleteRpc,
+  WsProjectGoalsRunNowRpc,
+  WsProjectGoalsListSessionsRpc,
   WsServerReportClientActivityRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,

@@ -1334,6 +1334,14 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
     }),
+    projectGoalsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:project-goals:live",
+      tag: WS_METHODS.projectGoalsSubscribe,
+    }),
+    projectGoalSessions: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:project-goals:sessions",
+      tag: WS_METHODS.projectGoalsListSessions,
+    }),
     // A cold transcript scan is measured in seconds, so keep the result around
     // long enough that switching windows or re-rendering does not rescan.
     usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -1581,6 +1589,29 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.scheduledTasksRotateWebhookToken,
       scheduler: configScheduler,
       concurrency: configConcurrency,
+    }),
+    upsertProjectGoal: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:project-goal:upsert",
+      tag: WS_METHODS.projectGoalsUpsert,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    setProjectGoalStatus: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:project-goal:set-status",
+      tag: WS_METHODS.projectGoalsSetStatus,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    deleteProjectGoal: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:project-goal:delete",
+      tag: WS_METHODS.projectGoalsDelete,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    // Starting a session runs the provider, so keep it off the config lane.
+    runProjectGoalNow: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:project-goal:run-now",
+      tag: WS_METHODS.projectGoalsRunNow,
     }),
     createGuestShare: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:guest-share:create",
