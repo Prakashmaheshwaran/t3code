@@ -59,6 +59,7 @@ import {
   ArrowLeftIcon,
   BugIcon,
   ChartNoAxesColumnIcon,
+  PhoneIcon,
   CheckIcon,
   ChevronRightIcon,
   CornerLeftUpIcon,
@@ -96,6 +97,7 @@ import {
 import type { LegendListRef } from "@legendapp/list/react";
 import { useAtomValue } from "@effect/atom-react";
 
+import { toggleGrokVoiceCall } from "../grokVoice/call";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -1696,6 +1698,18 @@ function OpenCommandPaletteDialog(props: {
     shortcutCommand: "usage.open",
     run: async () => {
       await navigate({ to: "/usage" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:grok-voice-call",
+    searchTerms: ["voice", "call", "grok", "chatgpt", "talk", "speak", "live", "hang up"],
+    title: "Start or end voice call",
+    icon: <PhoneIcon className={ITEM_ICON_CLASS} />,
+    shortcutCommand: "voice.call",
+    run: async () => {
+      toggleGrokVoiceCall();
     },
   });
 

@@ -1,3 +1,4 @@
+import type { RunSpeed } from "./runSpeed";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { ToolCallDiffTarget } from "../../diffPanelStore";
@@ -211,6 +212,8 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH = {
 
 const CITED_HISTORY_LOADING: CitedHistory = { _tag: "loading" };
 
+const EMPTY_RUN_SPEEDS: ReadonlyMap<RunId, RunSpeed> = new Map();
+
 export interface MessagesTimelineHistoryControls {
   readonly hasMoreHistory: boolean;
   readonly loading: boolean;
@@ -305,6 +308,7 @@ interface MessagesTimelineProps {
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<ServerProviderSkill>;
   runs: ReadonlyArray<HandoffTimelineRun>;
+  runSpeeds?: ReadonlyMap<RunId, RunSpeed>;
   anchorMessageId: MessageId | null;
   onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
   onAnchorSizeChanged: (messageId: MessageId, size: number) => void;
@@ -406,6 +410,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
   runs: runsProp,
+  runSpeeds = EMPTY_RUN_SPEEDS,
   anchorMessageId,
   onAnchorReady,
   onAnchorSizeChanged,
@@ -1113,6 +1118,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     workspaceRoot,
     skills,
     runs,
+    runSpeeds,
     activeThreadEnvironmentId,
     onRevertToTurnCount,
     onRunShellCommand,

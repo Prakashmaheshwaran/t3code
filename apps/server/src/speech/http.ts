@@ -25,6 +25,12 @@ import {
 } from "../auth/http.ts";
 import * as SpeechPostProcessing from "./postProcessing.ts";
 import * as CloudSpeech from "./CloudSpeech.ts";
+import * as GrokVoice from "../grokVoice/GrokVoice.ts";
+import * as ChatGptVoice from "../chatgptVoice/ChatGptVoice.ts";
+import * as GrokCalls from "../grokVoice/GrokCalls.ts";
+import * as VoiceCallStore from "../voiceCalls/store.ts";
+import * as ServerConfig from "../config.ts";
+import * as Path from "effect/Path";
 import * as SpeechService from "./SpeechService.ts";
 
 const MAX_TRANSCRIBE_BODY_BYTES = SpeechService.MAX_SPEECH_BYTES + SPEECH_MAX_OPTIONS_BYTES + 4;
@@ -70,6 +76,13 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const speech = yield* SpeechService.SpeechService;
     const cloud = yield* CloudSpeech.CloudSpeech;
+    const grok = yield* GrokVoice.GrokVoice;
+    const chatgpt = yield* ChatGptVoice.ChatGptVoice;
+    const grokCalls = yield* GrokCalls.GrokCalls;
+    const path = yield* Path.Path;
+    const callsDir = VoiceCallStore.voiceCallsDir(
+      path.dirname((yield* ServerConfig.ServerConfig).serverRuntimeStatePath),
+    );
     const postProcessing = yield* SpeechPostProcessing.SpeechPostProcessing;
     const guard = Effect.fnUntraced(function* (
       endpoint: string,
@@ -227,6 +240,112 @@ export const speechHttpApiLayer = HttpApiBuilder.group(
           return yield* postProcessing
             .process(args.payload)
             .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+        }),
+      )
+      .handle(
+        "grokSession",
+        Effect.fn("environment.voice.grokSession")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* grok.session;
+        }),
+      )
+      .handle(
+        "grokDelegate",
+        Effect.fn("environment.voice.grokDelegate")(function* (args) {
+          yield* guard(args.endpoint.name);
+          // A request without a known call runs statelessly.
+          return yield* grokCalls.delegate(args.payload);
+        }),
+      )
+      .handle(
+        "chatgptModels",
+        Effect.fn("environment.voice.chatgptModels")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* chatgpt.models;
+        }),
+      )
+      .handle(
+        "chatgptStart",
+        Effect.fn("environment.voice.chatgptStart")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* chatgpt.start(args.payload);
+        }),
+      )
+      .handle(
+        "chatgptEvents",
+        Effect.fn("environment.voice.chatgptEvents")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* chatgpt.events(args.params.callId, args.query.after);
+        }),
+      )
+      .handle(
+        "chatgptContext",
+        Effect.fn("environment.voice.chatgptContext")(function* (args) {
+          yield* guard(args.endpoint.name);
+          yield* chatgpt.context(args.params.callId, args.payload);
+        }),
+      )
+      .handle(
+        "chatgptEnd",
+        Effect.fn("environment.voice.chatgptEnd")(function* (args) {
+          yield* guard(args.endpoint.name);
+          yield* chatgpt.end(args.params.callId);
+        }),
+      )
+      .handle(
+        "grokCallStart",
+        Effect.fn("environment.voice.grokCallStart")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* grokCalls.start(args.payload);
+        }),
+      )
+      .handle(
+        "grokCallLines",
+        Effect.fn("environment.voice.grokCallLines")(function* (args) {
+          yield* guard(args.endpoint.name);
+          yield* grokCalls.lines(args.params.callId, args.payload);
+        }),
+      )
+      .handle(
+        "grokCallResume",
+        Effect.fn("environment.voice.grokCallResume")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return yield* grokCalls.resume(args.params.callId);
+        }),
+      )
+      .handle(
+        "grokCallEnd",
+        Effect.fn("environment.voice.grokCallEnd")(function* (args) {
+          yield* guard(args.endpoint.name);
+          yield* grokCalls.end(args.params.callId);
+        }),
+      )
+      .handle(
+        "voiceCalls",
+        Effect.fn("environment.voice.voiceCalls")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return { calls: VoiceCallStore.listCalls(callsDir) };
+        }),
+      )
+      .handle(
+        "voiceCall",
+        Effect.fn("environment.voice.voiceCall")(function* (args) {
+          yield* guard(args.endpoint.name);
+          return { call: VoiceCallStore.readCall(callsDir, args.params.callId) ?? null };
+        }),
+      )
+      .handle(
+        "deleteVoiceCall",
+        Effect.fn("environment.voice.deleteVoiceCall")(function* (args) {
+          yield* guard(args.endpoint.name);
+          VoiceCallStore.deleteCall(callsDir, args.params.callId);
+        }),
+      )
+      .handle(
+        "clearVoiceCalls",
+        Effect.fn("environment.voice.clearVoiceCalls")(function* (args) {
+          yield* guard(args.endpoint.name);
+          VoiceCallStore.clearCalls(callsDir);
         }),
       );
   }),

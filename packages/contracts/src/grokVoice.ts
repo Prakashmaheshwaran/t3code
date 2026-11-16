@@ -1,0 +1,76 @@
+import * as Schema from "effect/Schema";
+
+/** A short-lived xAI realtime credential; the Grok CLI login never leaves the server. */
+export const GrokVoiceSession = Schema.Struct({
+  url: Schema.String,
+  token: Schema.String,
+  expiresAt: Schema.Number,
+});
+export type GrokVoiceSession = typeof GrokVoiceSession.Type;
+
+/** The thread on the user's screen, which "this thread" means in a voice request. */
+export const GrokVoiceViewed = Schema.Struct({
+  threadId: Schema.String,
+  title: Schema.optionalKey(Schema.String),
+  projectId: Schema.optionalKey(Schema.String),
+});
+export type GrokVoiceViewed = typeof GrokVoiceViewed.Type;
+
+/** One voice request for the stateless delegator, which acts through this server's MCP tools. */
+export const GrokVoiceDelegateRequest = Schema.Struct({
+  /** What the voice agent heard the user ask. */
+  request: Schema.String,
+  /** Both sides of the call since the previous delegation, as `User: …` / `Voice agent: …` lines. */
+  transcript: Schema.Array(Schema.String),
+  viewed: Schema.optionalKey(GrokVoiceViewed),
+  /** Notes on the call so far, and on recent calls, for requests that refer back to them. */
+  memory: Schema.optionalKey(Schema.String),
+  /** The language spoken replies are in; the user's own when omitted. */
+  replyLanguage: Schema.optionalKey(Schema.String),
+  /**
+   * A call the server remembers (`grokCallStart`). Its own lines then stand in for `transcript`,
+   * and its notes for `memory`.
+   */
+  callId: Schema.optionalKey(Schema.String),
+});
+export type GrokVoiceDelegateRequest = typeof GrokVoiceDelegateRequest.Type;
+
+export const GrokVoiceSentPrompt = Schema.Struct({
+  threadId: Schema.String,
+  title: Schema.String,
+  instruction: Schema.String,
+  /** Queued behind the thread's current run, whose result is not this request's. */
+  queued: Schema.optionalKey(Schema.Boolean),
+});
+export type GrokVoiceSentPrompt = typeof GrokVoiceSentPrompt.Type;
+
+export const GrokVoiceDelegateResult = Schema.Struct({
+  speech: Schema.String,
+  /** A thread the client should show; MCP cannot move the user's screen. */
+  open: Schema.optionalKey(Schema.String),
+  /** Work admitted this request, for announcing replies when they land. */
+  sent: Schema.Array(GrokVoiceSentPrompt),
+});
+export type GrokVoiceDelegateResult = typeof GrokVoiceDelegateResult.Type;
+
+export class GrokVoiceError extends Schema.TaggedError<GrokVoiceError>()(
+  "GrokVoiceError",
+  {
+    reason: Schema.Literals(["not-signed-in", "rejected", "rate-limit", "unavailable"]),
+    detail: Schema.optionalKey(Schema.String),
+  },
+  { httpApiStatus: 422 },
+) {
+  override get message() {
+    switch (this.reason) {
+      case "not-signed-in":
+        return "Sign in to the Grok CLI on this computer (run `grok`) to use Grok voice.";
+      case "rejected":
+        return "xAI rejected the Grok login. Run `grok` once to refresh it, then try again.";
+      case "rate-limit":
+        return "Your Grok plan reached a usage limit. Try again later.";
+      case "unavailable":
+        return `Grok voice is unavailable right now.${this.detail ? ` ${this.detail}` : ""}`;
+    }
+  }
+}
