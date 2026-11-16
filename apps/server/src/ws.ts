@@ -125,6 +125,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as ProjectGoals from "./projectGoals/ProjectGoalService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
@@ -1471,6 +1472,7 @@ export const layerWsRpc = (
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const projectGoals = yield* ProjectGoals.ProjectGoalService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
@@ -2295,6 +2297,24 @@ export const layerWsRpc = (
           providerSessionManager.subscribePromptSuggestion(input.threadId),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
+        [WS_METHODS.projectGoalsSubscribe]: (_input) => projectGoals.subscribeList(),
+        [WS_METHODS.projectGoalsUpsert]: (input) => projectGoals.upsert(input),
+        [WS_METHODS.projectGoalsSetStatus]: (input) =>
+          Effect.annotateCurrentSpan({ "project_goal.id": input.goalId }).pipe(
+            Effect.andThen(projectGoals.setStatus(input)),
+          ),
+        [WS_METHODS.projectGoalsDelete]: (input) =>
+          Effect.annotateCurrentSpan({ "project_goal.id": input.goalId }).pipe(
+            Effect.andThen(projectGoals.delete(input)),
+          ),
+        [WS_METHODS.projectGoalsRunNow]: (input) =>
+          Effect.annotateCurrentSpan({ "project_goal.id": input.goalId }).pipe(
+            Effect.andThen(projectGoals.runNow(input)),
+          ),
+        [WS_METHODS.projectGoalsListSessions]: (input) =>
+          Effect.annotateCurrentSpan({ "project_goal.id": input.goalId }).pipe(
+            Effect.andThen(projectGoals.listSessions(input)),
+          ),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
