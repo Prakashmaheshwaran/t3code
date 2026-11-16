@@ -307,21 +307,24 @@ const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
     ),
   ),
 );
-const layerProjectGoalProvided = Layer.effectDiscard(
-  Effect.gen(function* () {
-    const service = yield* ProjectGoalService.ProjectGoalService;
-    yield* service.start();
-  }),
-).pipe(
-  Layer.provideMerge(ProjectGoalService.layer),
+const layerProjectGoalService = ProjectGoalService.layer.pipe(
+  // layerThreadLaunchProvided already exposes ProjectService to the layers beside it.
   Layer.provide(
     Layer.mergeAll(
       layerOrchestratorProvided,
       layerThreadLaunchProvided,
       layerThreadManagementProvided,
-      layerProjectService,
     ),
   ),
+);
+const layerProjectGoalProvided = Layer.merge(
+  layerProjectGoalService,
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* ProjectGoalService.ProjectGoalService;
+      yield* service.start();
+    }),
+  ).pipe(Layer.provide(layerProjectGoalService)),
 );
 const layerScratchThreadPromotionProvided = ScratchThreadPromotion.layer.pipe(
   Layer.provide(
